@@ -113,6 +113,9 @@ NTSTATUS InjectionCore::GetTargetProcess( InjectContext& context, PROCESS_INFORM
             return LastNtStatus();
         }
 
+        // Remember the new PID for callers/status output
+        context.pid = pi.dwProcessId;
+
         // Escalate handle access rights through driver
         if (context.cfg.krnHandle)
         {
@@ -466,6 +469,8 @@ NTSTATUS InjectionCore::InjectMultiple( InjectContext* pContext )
     {
         if (status == STATUS_SUCCESS)
             ResumeThread( pi.hThread );
+        else if (pi.hProcess)
+            TerminateProcess( pi.hProcess, 1 );   // Don't leave a suspended process behind
 
         CloseHandle( pi.hThread );
     }

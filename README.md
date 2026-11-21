@@ -80,8 +80,9 @@ Extra rules can be added in `engines.ini` (next to the executable or in
 
 ### Headless CLI (`XenosCli`) ###
 
-The picker core (`EngineDetect`, `ProcessCatalog`, `AppSettings`) has no GUI
-dependency and is exposed through a console front-end:
+The picker core (`EngineDetect`, `ProcessCatalog`, `AppSettings`) and the
+injection engine (`InjectionCore`) have no GUI dependency and are exposed
+through a console front-end:
 
 ```text
 XenosCli64 list   [--mode all|games|recent] [--filter TEXT] [--json]
@@ -91,6 +92,7 @@ XenosCli64 remember <pid|name>
 XenosCli64 forget
 XenosCli64 recent
 XenosCli64 engines
+XenosCli64 inject --dll <path> [--dll <path> ...] [target] [options]
 XenosCli64 gui [--load profile.xpr64]
 ```
 
@@ -107,8 +109,54 @@ XenosCli64 remember mygame
 nothing matches. `gui` launches the GUI (elevation prompt included) and passes
 its arguments through, so it can be used as a drop-in launcher.
 
-Injection itself is still performed by the GUI; the CLI is the authoritative
-implementation of discovery, fingerprinting, filtering and target history.
+#### Injection ####
+
+`inject` drives the same `InjectionCore` as the GUI:
+
+```text
+# picker result (--mode/--filter + recent target)
+XenosCli64 inject --dll payload.dll --mode games --filter mygame --manual
+
+# explicit target
+XenosCli64 inject --dll payload.dll --pid 1234 --method normal
+XenosCli64 inject --dll payload.dll --name Game.exe --unlink
+
+# launch or wait for a process
+XenosCli64 inject --dll payload.dll --new "C:\Games\MyGame\MyGame.exe"
+XenosCli64 inject --dll payload.dll --wait MyGame.exe --timeout 60
+
+# manual map with an init routine, multiple images
+XenosCli64 inject --dll a.dll --dll b.dll --pid 1234 --method manual \
+  --init Initialize --arg "config.json"
+```
+
+Target selection (default: picker result):
+
+| Option | Meaning |
+| --- | --- |
+| `--pid <n>` | Attach to a running PID. |
+| `--name <exe>` | First running process with that image name. |
+| `--new <exe>` | Create the process, inject, resume it. |
+| `--wait <exe>` | Wait for a **new** instance (with `--timeout`). |
+
+Injection options:
+
+| Option | Meaning |
+| --- | --- |
+| `--method normal\|manual\|kernel-thread\|kernel-apc\|kernel-mmap\|driver` | Injection type (default normal). |
+| `--init <export>`, `--arg <text>` | Call an init routine after mapping. |
+| `--unlink`, `--hijack`, `--erase-pe`, `--krn-handle` | Native injection switches. |
+| `--ldr-ref`, `--manual-imports`, `--wipe-header`, `--hide-vad`, `--no-tls`, `--no-exceptions`, `--mmap-flags <hex>` | Manual map flags. |
+| `--delay <ms>`, `--period <ms>` | Pre-injection delay / delay between images. |
+| `--dry-run` | Resolve the target, validate the images, do nothing. |
+| `--json` | JSON result on stdout (progress/diagnostics go to stderr). |
+
+Exit codes: `0` success, `1` target not found, `2` usage/validation error,
+`3` injection failure. Kernel methods require an elevated prompt; normal and
+manual mapping work at the caller's integrity level.
+
+Both the CLI and the GUI are front-ends to the same core; the GUI is a thin
+shell around the picker and `InjectionCore`.
 
 ### Building ###
 

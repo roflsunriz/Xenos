@@ -60,31 +60,48 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)build\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)build\obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <IncludePath>$(ProjectDir)..\..\ext;$(ProjectDir)..\..\ext\blackbone\contrib;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_CONSOLE;UNICODE;_UNICODE;BLACKBONE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <AdditionalIncludeDirectories>$(ProjectDir)..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>Shlwapi.lib;Psapi.lib;User32.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Shlwapi.lib;Psapi.lib;User32.lib;Shell32.lib;Dbghelp.lib;Comctl32.lib;mscoree.lib;BlackBone.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\..\build\$(Platform)\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="XenosCli.cpp" />
     <ClCompile Include="..\AppSettings.cpp" />
     <ClCompile Include="..\EngineDetect.cpp" />
+    <ClCompile Include="..\FileUtil.cpp" />
+    <ClCompile Include="..\InjectionCore.cpp" />
     <ClCompile Include="..\ProcessCatalog.cpp" />
+    <ClCompile Include="..\ProfileMgr.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\AppSettings.h" />
     <ClInclude Include="..\EngineDetect.h" />
+    <ClInclude Include="..\InjectionCore.h" />
     <ClInclude Include="..\ProcessCatalog.h" />
+    <ClInclude Include="..\ProfileMgr.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="XenosCli.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ext\BlackBone\src\BlackBone\BlackBone.vcxproj">
+      <Project>{a2c53563-46f5-4d87-903f-3f1f2fdb2deb}</Project>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

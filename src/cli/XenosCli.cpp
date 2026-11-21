@@ -1,8 +1,12 @@
-// XenosCli - headless front-end for the process picker core.
+// XenosCli - headless front-end for the process picker and injection core.
 //
-// The CLI owns the discovery / fingerprint / filter / recent-target logic
-// (shared with the GUI through ProcessCatalog). The GUI is launched with
-// `XenosCli gui` and is a thin wrapper around the same selection model.
+// The CLI owns discovery / fingerprint / filter / recent-target logic and
+// drives the same InjectionCore used by the GUI:
+//
+//   XenosCli inject --dll payload.dll --mode games --filter mygame
+//   XenosCli inject --dll payload.dll --pid 1234 --method manual
+//   XenosCli inject --dll payload.dll --new "C:\Games\Game.exe"
+//   XenosCli inject --dll payload.dll --wait Game.exe --timeout 60
 
 #include <windows.h>
 #include <shellapi.h>
@@ -10,12 +14,17 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "../AppSettings.h"
 #include "../EngineDetect.h"
+#include "../InjectionCore.h"
+#include "../Message.hpp"
 #include "../ProcessCatalog.h"
+#include "../DriverExtract.h"
 
 namespace
 {
@@ -83,6 +92,15 @@ namespace
         WriteAll( g_stderr, buffer, wcslen( buffer ), g_consoleErr );
     }
 
+    void CliMessageHandler( const std::wstring& msg, const std::wstring& /*title*/, Message::MsgType type )
+    {
+        const wchar_t* kind =
+            type == Message::Error ? L"error" :
+            type == Message::Warning ? L"warning" : L"info";
+
+        Err( L"[%ls] %ls\n", kind, msg.c_str() );
+    }
+
     std::wstring JsonEscape( const std::wstring& value )
     {
         std::wstring result;
@@ -114,6 +132,20 @@ namespace
         return result;
     }
 
+    std::wstring BaseName( const std::wstring& path )
+    {
+        auto pos = path.find_last_of( L"\\/" );
+        return pos == std::wstring::npos ? path : path.substr( pos + 1 );
+    }
+
+    std::wstring AbsolutePath( const std::wstring& path )
+    {
+        wchar_t buffer[MAX_PATH * 2] = { 0 };
+        DWORD len = GetFullPathNameW( path.c_str(), ARRAYSIZE( buffer ), buffer, nullptr );
+
+        return (len > 0 && len < ARRAYSIZE( buffer )) ? std::wstring( buffer ) : path;
+    }
+
     struct Options
     {
         PickerMode mode = PickerMode::Games;
@@ -121,6 +153,26 @@ namespace
         bool json = false;
         bool autoRecent = true;
         std::vector<std::wstring> positional;
+
+        // inject
+        std::vector<std::wstring> dlls;
+        std::wstring targetPid;
+        std::wstring targetName;
+        std::wstring newExe;
+        std::wstring waitExe;
+        std::wstring cmdline;
+        std::wstring initRoutine;
+        std::wstring initArgs;
+        int method = Normal;
+        uint32_t mmapFlags = 0;
+        bool unlink = false;
+        bool hijack = false;
+        bool erasePE = false;
+        bool krnHandle = false;
+        int delay = 0;
+        int period = 0;
+        int timeoutSec = 30;
+        bool dryRun = false;
     };
 
     bool ParseMode( const std::wstring& value, PickerMode& mode )
@@ -135,6 +187,41 @@ namespace
             return false;
 
         return true;
+    }
+
+    bool ParseMethod( const std::wstring& value, int& method )
+    {
+        if (_wcsicmp( value.c_str(), L"normal" ) == 0)
+            method = Normal;
+        else if (_wcsicmp( value.c_str(), L"manual" ) == 0)
+            method = Manual;
+        else if (_wcsicmp( value.c_str(), L"kernel-thread" ) == 0)
+            method = Kernel_Thread;
+        else if (_wcsicmp( value.c_str(), L"kernel-apc" ) == 0)
+            method = Kernel_APC;
+        else if (_wcsicmp( value.c_str(), L"kernel-mmap" ) == 0)
+            method = Kernel_MMap;
+        else if (_wcsicmp( value.c_str(), L"driver" ) == 0)
+            method = Kernel_DriverMap;
+        else
+            return false;
+
+        return true;
+    }
+
+    const wchar_t* MethodName( int method )
+    {
+        switch (method)
+        {
+            case Normal:        return L"normal";
+            case Manual:        return L"manual";
+            case Kernel_Thread: return L"kernel-thread";
+            case Kernel_APC:    return L"kernel-apc";
+            case Kernel_MMap:   return L"kernel-mmap";
+            case Kernel_DriverMap: return L"driver";
+        }
+
+        return L"normal";
     }
 
     bool ParseOptions( int argc, wchar_t** argv, int start, Options& options )
@@ -167,6 +254,110 @@ namespace
             {
                 options.autoRecent = false;
             }
+            else if (arg == L"--dll" && i + 1 < argc)
+            {
+                options.dlls.emplace_back( argv[++i] );
+            }
+            else if (arg == L"--pid" && i + 1 < argc)
+            {
+                options.targetPid = argv[++i];
+            }
+            else if (arg == L"--name" && i + 1 < argc)
+            {
+                options.targetName = argv[++i];
+            }
+            else if (arg == L"--new" && i + 1 < argc)
+            {
+                options.newExe = argv[++i];
+            }
+            else if (arg == L"--wait" && i + 1 < argc)
+            {
+                options.waitExe = argv[++i];
+            }
+            else if (arg == L"--cmdline" && i + 1 < argc)
+            {
+                options.cmdline = argv[++i];
+            }
+            else if (arg == L"--init" && i + 1 < argc)
+            {
+                options.initRoutine = argv[++i];
+            }
+            else if (arg == L"--arg" && i + 1 < argc)
+            {
+                options.initArgs = argv[++i];
+            }
+            else if (arg == L"--method" && i + 1 < argc)
+            {
+                if (!ParseMethod( argv[++i], options.method ))
+                {
+                    Err( L"Unknown method: %ls\n", argv[i] );
+                    return false;
+                }
+            }
+            else if (arg == L"--manual")
+            {
+                options.method = Manual;
+            }
+            else if (arg == L"--mmap-flags" && i + 1 < argc)
+            {
+                options.mmapFlags |= static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--ldr-ref")
+            {
+                options.mmapFlags |= blackbone::CreateLdrRef;
+            }
+            else if (arg == L"--manual-imports")
+            {
+                options.mmapFlags |= blackbone::ManualImports;
+            }
+            else if (arg == L"--wipe-header")
+            {
+                options.mmapFlags |= blackbone::WipeHeader;
+            }
+            else if (arg == L"--hide-vad")
+            {
+                options.mmapFlags |= blackbone::HideVAD;
+            }
+            else if (arg == L"--no-tls")
+            {
+                options.mmapFlags |= blackbone::NoTLS;
+            }
+            else if (arg == L"--no-exceptions")
+            {
+                options.mmapFlags |= blackbone::NoExceptions;
+            }
+            else if (arg == L"--unlink")
+            {
+                options.unlink = true;
+            }
+            else if (arg == L"--hijack")
+            {
+                options.hijack = true;
+            }
+            else if (arg == L"--erase-pe")
+            {
+                options.erasePE = true;
+            }
+            else if (arg == L"--krn-handle")
+            {
+                options.krnHandle = true;
+            }
+            else if (arg == L"--delay" && i + 1 < argc)
+            {
+                options.delay = _wtoi( argv[++i] );
+            }
+            else if (arg == L"--period" && i + 1 < argc)
+            {
+                options.period = _wtoi( argv[++i] );
+            }
+            else if (arg == L"--timeout" && i + 1 < argc)
+            {
+                options.timeoutSec = _wtoi( argv[++i] );
+            }
+            else if (arg == L"--dry-run")
+            {
+                options.dryRun = true;
+            }
             else if (arg == L"--help" || arg == L"-h" || arg == L"/?")
             {
                 options.positional.emplace_back( L"--help" );
@@ -188,9 +379,9 @@ namespace
     void PrintUsage()
     {
         Out(
-            L"XenosCli - process picker core\n"
+            L"XenosCli - process picker and injector\n"
             L"\n"
-            L"Usage:\n"
+            L"Discovery:\n"
             L"  XenosCli list   [--mode all|games|recent] [--filter TEXT] [--json]  (default: all)\n"
             L"  XenosCli pick   [--mode ...] [--filter ...] [--no-recent] [--json] (default: saved mode)\n"
             L"  XenosCli detect <pid|name>\n"
@@ -198,7 +389,32 @@ namespace
             L"  XenosCli forget\n"
             L"  XenosCli recent\n"
             L"  XenosCli engines\n"
-            L"  XenosCli gui [gui arguments...]\n"
+            L"\n"
+            L"Injection:\n"
+            L"  XenosCli inject --dll <path> [--dll <path> ...] [target] [options]\n"
+            L"\n"
+            L"  Target (default: picker result = --mode/--filter + recent target):\n"
+            L"    --pid <pid>              attach to a running PID\n"
+            L"    --name <image.exe>       attach to a running process by name\n"
+            L"    --new <exe>              create the process and inject\n"
+            L"    --wait <exe>             wait for a new instance, then inject\n"
+            L"    --timeout <sec>          wait timeout (default 30)\n"
+            L"\n"
+            L"  Options:\n"
+            L"    --method normal|manual|kernel-thread|kernel-apc|kernel-mmap|driver\n"
+            L"    --manual                 alias for --method manual\n"
+            L"    --init <export>          call an exported initialization routine\n"
+            L"    --arg <text>             argument passed to the init routine\n"
+            L"    --cmdline <text>         command line for --new\n"
+            L"    --ldr-ref --manual-imports --wipe-header --hide-vad\n"
+            L"    --no-tls --no-exceptions --mmap-flags <hex>\n"
+            L"    --unlink --hijack --erase-pe --krn-handle\n"
+            L"    --delay <ms> --period <ms>\n"
+            L"    --dry-run                resolve and validate, do not inject\n"
+            L"    --json                   machine-readable result\n"
+            L"\n"
+            L"  GUI:\n"
+            L"    XenosCli gui [gui arguments...]\n"
             L"\n"
             L"Filter syntax:\n"
             L"  name fragment     substring / prefix / fuzzy subsequence\n"
@@ -208,9 +424,10 @@ namespace
             L"\n"
             L"Examples:\n"
             L"  XenosCli list --mode games\n"
-            L"  XenosCli list --mode all --filter unreal\n"
             L"  XenosCli list --filter \"@unity mono\"\n"
-            L"  XenosCli pick --filter mygame --json\n" );
+            L"  XenosCli inject --dll payload.dll --mode games --filter mygame --manual\n"
+            L"  XenosCli inject --dll payload.dll --pid 1234 --method normal\n"
+            L"  XenosCli inject --dll payload.dll --new \"C:\\Games\\MyGame\\MyGame.exe\" --timeout 60\n" );
     }
 
     void PrintEntry( const proc::Entry& entry )
@@ -385,7 +602,7 @@ namespace
         return 0;
     }
 
-    int CommandForget( const Options& options )
+    int CommandForget( const Options& /*options*/ )
     {
         auto& settings = AppSettings::Instance();
         settings.Load();
@@ -396,7 +613,7 @@ namespace
         return 0;
     }
 
-    int CommandRecent( const Options& options )
+    int CommandRecent( const Options& /*options*/ )
     {
         auto& settings = AppSettings::Instance();
         settings.Load();
@@ -485,11 +702,318 @@ namespace
         Out( L"launched: %ls\n", gui.c_str() );
         return 0;
     }
+
+    // ---------------------------------------------------------------------
+    // Injection
+    // ---------------------------------------------------------------------
+
+    struct ResolvedTarget
+    {
+        DWORD pid = 0;
+        std::wstring name;
+        std::wstring path;
+        ProcMode mode = Existing;
+    };
+
+    bool ResolveTarget( const Options& options, ResolvedTarget& target )
+    {
+        // Driver mapping does not need a process
+        if (options.method == Kernel_DriverMap && options.targetPid.empty() &&
+            options.targetName.empty() && options.newExe.empty() && options.waitExe.empty())
+        {
+            if (options.dlls.empty())
+                return false;
+
+            target.name = BaseName( options.dlls.front() );
+            target.path = AbsolutePath( options.dlls.front() );
+            return true;
+        }
+
+        if (!options.newExe.empty())
+        {
+            target.path = AbsolutePath( options.newExe );
+            if (GetFileAttributesW( target.path.c_str() ) == INVALID_FILE_ATTRIBUTES)
+                return false;
+
+            target.name = BaseName( target.path );
+            target.mode = NewProcess;
+            return true;
+        }
+
+        if (!options.waitExe.empty())
+        {
+            const std::wstring name = BaseName( options.waitExe );
+
+            proc::Catalog catalog;
+            catalog.Refresh();
+
+            std::set<DWORD> known;
+            for (auto& entry : catalog.All())
+            {
+                if (_wcsicmp( entry.name.c_str(), name.c_str() ) == 0)
+                    known.insert( entry.pid );
+            }
+
+            Err( L"waiting for a new %ls instance (%d s timeout)...\n", name.c_str(), options.timeoutSec );
+
+            const ULONGLONG start = GetTickCount64();
+            for (;;)
+            {
+                Sleep( 250 );
+                catalog.Refresh();
+
+                for (auto& entry : catalog.All())
+                {
+                    if (_wcsicmp( entry.name.c_str(), name.c_str() ) == 0 && known.count( entry.pid ) == 0)
+                    {
+                        target.pid = entry.pid;
+                        target.name = entry.name;
+                        target.path = entry.path;
+                        target.mode = Existing;
+                        return true;
+                    }
+                }
+
+                if (options.timeoutSec > 0 && GetTickCount64() - start >= static_cast<ULONGLONG>( options.timeoutSec ) * 1000)
+                    return false;
+            }
+        }
+
+        if (!options.targetPid.empty() || !options.targetName.empty())
+        {
+            proc::Catalog catalog;
+            catalog.Refresh();
+
+            proc::Entry entry;
+            const std::wstring key = !options.targetPid.empty() ? options.targetPid : options.targetName;
+            if (!catalog.Find( key, entry ))
+                return false;
+
+            target.pid = entry.pid;
+            target.name = entry.name;
+            target.path = entry.path;
+            target.mode = Existing;
+            return true;
+        }
+
+        // Picker result (mode/filter + recent target)
+        proc::Catalog catalog;
+        catalog.Refresh();
+
+        proc::QueryOptions query;
+        query.mode = options.mode;
+        query.filter = options.filter;
+
+        auto entries = catalog.Query( query );
+        if (entries.empty())
+            return false;
+
+        int index = options.autoRecent ? proc::Catalog::FindRecent( entries, AppSettings::Instance() ) : -1;
+        if (index < 0)
+            index = 0;
+
+        target.pid = entries[index].pid;
+        target.name = entries[index].name;
+        target.path = entries[index].path;
+        target.mode = Existing;
+        return true;
+    }
+
+    bool LoadImages( const Options& options, vecPEImages& images, std::vector<std::wstring>& paths )
+    {
+        for (auto& dll : options.dlls)
+        {
+            std::wstring path = AbsolutePath( dll );
+
+            if (GetFileAttributesW( path.c_str() ) == INVALID_FILE_ATTRIBUTES)
+            {
+                Err( L"image not found: %ls\n", path.c_str() );
+                return false;
+            }
+
+            auto image = std::make_shared<blackbone::pe::PEImage>();
+            NTSTATUS status = image->Load( path );
+            if (!NT_SUCCESS( status ))
+            {
+                Err( L"invalid PE image: %ls (0x%08X)\n", path.c_str(), status );
+                return false;
+            }
+
+            // Populate exports for --init / pure managed images
+            if (image->pureIL() && image->net().Init( path ))
+            {
+                blackbone::ImageNET::mapMethodRVA methods;
+                image->net().Parse( &methods );
+            }
+            else
+            {
+                blackbone::pe::vecExports exports;
+                image->GetExports( exports );
+            }
+
+            image->Release( true );
+
+            images.emplace_back( std::move( image ) );
+            paths.emplace_back( std::move( path ) );
+        }
+
+        return true;
+    }
+
+    bool IsElevated()
+    {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token ))
+            return false;
+
+        TOKEN_ELEVATION elevation = { 0 };
+        DWORD size = 0;
+        bool elevated = GetTokenInformation(
+            token, TokenElevation, &elevation, sizeof( elevation ), &size ) &&
+            elevation.TokenIsElevated != 0;
+
+        CloseHandle( token );
+        return elevated;
+    }
+
+    int CommandInject( const Options& options )
+    {
+        if (options.dlls.empty())
+        {
+            Err( L"inject requires --dll <path>\n" );
+            return 2;
+        }
+
+        ResolvedTarget target;
+        if (!ResolveTarget( options, target ))
+        {
+            Err( L"target process not found\n" );
+            return 1;
+        }
+
+        vecPEImages images;
+        std::vector<std::wstring> paths;
+        if (!LoadImages( options, images, paths ))
+            return 2;
+
+        if (options.dryRun)
+        {
+            if (options.json)
+            {
+                Out( L"{\"dryRun\":true,\"pid\":%lu,\"name\":\"%ls\",\"path\":\"%ls\",\"method\":\"%ls\",\"images\":[",
+                     target.pid, JsonEscape( target.name ).c_str(), JsonEscape( target.path ).c_str(),
+                     MethodName( options.method ) );
+
+                for (size_t i = 0; i < paths.size(); i++)
+                {
+                    if (i)
+                        Out( L"," );
+
+                    Out( L"\"%ls\"", JsonEscape( paths[i] ).c_str() );
+                }
+
+                Out( L"]}\n" );
+            }
+            else
+            {
+                Out( L"target: %ls (%lu)\n", target.name.c_str(), target.pid );
+                Out( L"path:   %ls\n", target.path.c_str() );
+                Out( L"method: %ls\n", MethodName( options.method ) );
+
+                for (size_t i = 0; i < paths.size(); i++)
+                    Out( L"dll[%zu]: %ls\n", i, paths[i].c_str() );
+            }
+
+            return 0;
+        }
+
+        if (!IsElevated() && options.method < Kernel_Thread && !options.krnHandle)
+            Err( L"note: not running elevated; elevated/protected targets will fail\n" );
+
+        // Kernel methods and handle escalation need the embedded driver
+        const bool needsDriver = options.method >= Kernel_Thread || options.krnHandle;
+        if (needsDriver)
+        {
+            if (!IsElevated())
+            {
+                Err( L"kernel injection / --krn-handle requires administrator rights; run from an elevated prompt\n" );
+                return 3;
+            }
+
+            DriverExtract::Instance().Extract();
+
+            NTSTATUS driverStatus = blackbone::Driver().EnsureLoaded();
+            if (!NT_SUCCESS( driverStatus ))
+            {
+                DriverExtract::Instance().Cleanup();
+                Err( L"failed to load BlackBone driver (0x%08X)\n", driverStatus );
+
+                // Driver state is undefined after a failed load; skip static teardown
+                ExitProcess( 3 );
+            }
+        }
+
+        InjectContext context;
+        context.cfg.processMode = target.mode;
+        context.cfg.injectMode = options.method;
+        context.cfg.procName = target.name;
+        context.cfg.procCmdLine = options.cmdline;
+        context.cfg.initRoutine = options.initRoutine;
+        context.cfg.initArgs = options.initArgs;
+        context.cfg.mmapFlags = options.mmapFlags;
+        context.cfg.hijack = options.hijack;
+        context.cfg.unlink = options.unlink;
+        context.cfg.erasePE = options.erasePE;
+        context.cfg.krnHandle = options.krnHandle;
+        context.cfg.delay = options.delay;
+        context.cfg.period = options.period;
+        context.cfg.images = paths;
+
+        context.pid = target.pid;
+        context.procPath = target.path;
+        context.images = images;
+
+        if (target.mode == NewProcess && context.cfg.procCmdLine.empty())
+            context.cfg.procCmdLine = L"\"" + target.path + L"\"";
+
+        HWND hwnd = nullptr;
+        InjectionCore core( hwnd );
+
+        NTSTATUS status = core.InjectMultiple( &context );
+        if (!NT_SUCCESS( status ))
+        {
+            Err( L"injection failed: 0x%08X %ls\n", status,
+                 blackbone::Utils::GetErrorDescription( status ).c_str() );
+
+            if (!IsElevated() && (status == STATUS_ACCESS_DENIED || status == static_cast<NTSTATUS>( 0xC0000022 )))
+                Err( L"hint: retry from an elevated prompt\n" );
+
+            return 3;
+        }
+
+        if (options.json)
+        {
+            Out( L"{\"ok\":true,\"pid\":%lu,\"name\":\"%ls\",\"path\":\"%ls\",\"method\":\"%ls\",\"images\":%zu}\n",
+                 context.pid,
+                 JsonEscape( target.name ).c_str(),
+                 JsonEscape( target.path ).c_str(),
+                 MethodName( options.method ),
+                 paths.size() );
+        }
+        else
+        {
+            Out( L"injected %zu image(s) into %ls (%lu) using %ls\n",
+                 paths.size(), target.name.c_str(), context.pid, MethodName( options.method ) );
+        }
+
+        return 0;
+    }
 }
 
 int wmain( int argc, wchar_t** argv )
 {
     InitOutput();
+    Message::SetHandler( &CliMessageHandler );
 
     AppSettings::Instance().Load();
 
@@ -509,7 +1033,7 @@ int wmain( int argc, wchar_t** argv )
     options.mode = PickerMode::All;
 
     // `pick` mirrors the GUI's last used picker mode, `list` defaults to all
-    if (command == L"pick" || command == L"select")
+    if (command == L"pick" || command == L"select" || command == L"inject")
         options.mode = AppSettings::Instance().pickerMode;
 
     int start = argc > 1 ? 2 : 1;
@@ -542,6 +1066,8 @@ int wmain( int argc, wchar_t** argv )
         return CommandRecent( options );
     if (command == L"engines")
         return CommandEngines( options );
+    if (command == L"inject")
+        return CommandInject( options );
     if (command == L"help")
     {
         PrintUsage();

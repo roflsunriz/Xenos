@@ -5,6 +5,7 @@
 
 class Message
 {
+public:
     enum MsgType
     {
         Error,
@@ -12,6 +13,17 @@ class Message
         Info,
         Question,
     };
+
+    /// <summary>
+    /// Optional sink for headless front-ends. When set, messages are delivered
+    /// here instead of blocking on a MessageBox.
+    /// </summary>
+    typedef void (*fnHandler)(const std::wstring& msg, const std::wstring& title, MsgType type);
+
+    static void SetHandler( fnHandler handler )
+    {
+        _handler = handler;
+    }
 
 public:
     static void ShowError( HWND parent, const std::wstring& msg, const std::wstring& title = L"Error" )
@@ -65,6 +77,14 @@ private:
         if (logLevel < xlog::LogLevel::verbose)
             xlog::Logger::Instance().DoLog( logLevel, "%ls", msg.c_str() );
 
+        if (_handler)
+        {
+            _handler( msg, title, type );
+            return (type == Question) ? IDNO : IDOK;
+        }
+
         return MessageBoxW( parent, msg.c_str(), title.c_str(), uType );
     }
+
+    static inline fnHandler _handler = nullptr;
 };
