@@ -927,16 +927,18 @@ namespace
             return 0;
         }
 
-        if (!IsElevated() && options.method < Kernel_Thread && !options.krnHandle)
+        // Kernel methods, handle escalation and HideVAD need the driver
+        const bool needsDriver = options.method >= Kernel_Thread || options.krnHandle ||
+            (options.mmapFlags & blackbone::HideVAD) != 0;
+
+        if (!IsElevated() && !needsDriver)
             Err( L"note: not running elevated; elevated/protected targets will fail\n" );
 
-        // Kernel methods and handle escalation need the embedded driver
-        const bool needsDriver = options.method >= Kernel_Thread || options.krnHandle;
         if (needsDriver)
         {
             if (!IsElevated())
             {
-                Err( L"kernel injection / --krn-handle requires administrator rights; run from an elevated prompt\n" );
+                Err( L"kernel injection / --krn-handle / --hide-vad requires administrator rights; run from an elevated prompt\n" );
                 return 3;
             }
 

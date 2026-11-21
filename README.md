@@ -152,8 +152,9 @@ Injection options:
 | `--json` | JSON result on stdout (progress/diagnostics go to stderr). |
 
 Exit codes: `0` success, `1` target not found, `2` usage/validation error,
-`3` injection failure. Kernel methods require an elevated prompt; normal and
-manual mapping work at the caller's integrity level.
+`3` injection failure. Kernel methods, `--krn-handle` and `--hide-vad` require
+an elevated prompt; normal and manual mapping work at the caller's integrity
+level.
 
 Both the CLI and the GUI are front-ends to the same core; the GUI is a thin
 shell around the picker and `InjectionCore`.
