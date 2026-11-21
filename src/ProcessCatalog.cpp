@@ -239,6 +239,23 @@ int Catalog::FindPid( const std::vector<Entry>& list, DWORD pid )
 
 int Catalog::FindRecent( const std::vector<Entry>& list, const AppSettings& settings )
 {
+    // Prefer the exact instance that was selected last time (validated against
+    // the remembered name/path so PID reuse cannot select an unrelated image).
+    if (settings.lastPid != 0)
+    {
+        for (size_t i = 0; i < list.size(); i++)
+        {
+            if (list[i].pid != settings.lastPid)
+                continue;
+
+            for (auto& target : settings.recent)
+            {
+                if (target.Matches( list[i].name, list[i].path ))
+                    return static_cast<int>( i );
+            }
+        }
+    }
+
     for (auto& target : settings.recent)
     {
         for (size_t i = 0; i < list.size(); i++)

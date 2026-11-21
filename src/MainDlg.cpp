@@ -347,6 +347,7 @@ void MainDlg::SelectVisibleItem( int index, bool remember )
     {
         auto& settings = AppSettings::Instance();
         settings.RememberTarget( entry.name, entry.path );
+        settings.lastPid = entry.pid;
         settings.Save();
 
         _restoreName.clear();

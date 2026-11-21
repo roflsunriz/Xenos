@@ -378,6 +378,7 @@ namespace
         auto& settings = AppSettings::Instance();
         settings.Load();
         settings.RememberTarget( entry.name, entry.path );
+        settings.lastPid = entry.pid;
         settings.Save();
 
         Out( L"remembered: %ls (%lu)\n", entry.name.c_str(), entry.pid );

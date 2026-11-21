@@ -43,6 +43,7 @@ public:
 
     PickerMode pickerMode = PickerMode::Games;  // last used existing-process filter
     bool autoSelectRecent = true;               // re-select the last target when running
+    DWORD lastPid = 0;                          // last explicitly selected PID (validated by name/path)
 
     std::vector<TargetRef> recent;              // most recent first, max 8
 

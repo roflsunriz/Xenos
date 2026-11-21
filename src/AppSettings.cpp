@@ -222,6 +222,10 @@ void AppSettings::Load()
         {
             autoSelectRecent = ParseBool( value, autoSelectRecent );
         }
+        else if (_wcsicmp( key.c_str(), L"LastPid" ) == 0)
+        {
+            lastPid = static_cast<DWORD>( _wtoi( value.c_str() ) );
+        }
         else if (_wcsicmp( key.c_str(), L"LastName" ) == 0)
         {
             legacyName = value;
@@ -286,6 +290,7 @@ void AppSettings::Save()
     text += L"[Target]\n";
     text += L"Mode=" + std::wstring( ModeName( pickerMode ) ) + L"\n";
     text += L"AutoSelectLast=" + std::wstring( autoSelectRecent ? L"1" : L"0" ) + L"\n";
+    text += L"LastPid=" + std::to_wstring( lastPid ) + L"\n";
 
     for (size_t i = 0; i < recent.size() && i < MaxRecentTargets; i++)
     {
@@ -318,4 +323,5 @@ void AppSettings::RememberTarget( const std::wstring& name, const std::wstring& 
 void AppSettings::ForgetTargets()
 {
     recent.clear();
+    lastPid = 0;
 }
