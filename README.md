@@ -92,6 +92,9 @@ XenosCli64 remember <pid|name>
 XenosCli64 forget
 XenosCli64 recent
 XenosCli64 engines
+XenosCli64 injections [--pid N] [--json]
+XenosCli64 eject <handle> [--force] [--json]
+XenosCli64 reinject <handle> [--json]
 XenosCli64 inject --dll <path> [--dll <path> ...] [target] [options]
 XenosCli64 gui [--load profile.xpr64]
 ```
@@ -155,6 +158,47 @@ Exit codes: `0` success, `1` target not found, `2` usage/validation error,
 `3` injection failure. Kernel methods, `--krn-handle` and `--hide-vad` require
 an elevated prompt; normal and manual mapping work at the caller's integrity
 level.
+
+#### Injection handles (safe eject / re-inject) ####
+
+Every successful injection is assigned a numeric handle and recorded in
+`%APPDATA%\Xenos\injections.ini`:
+
+```text
+> XenosCli64 inject --dll payload.dll --mode games --filter mygame
+injected 1 image(s) into MyGame.exe (4242) using manual
+handles: #7
+
+> XenosCli64 injections
+HANDLE     PID  MODULE              BASE          METHOD     STATE     IMAGE
+#7        4242  payload.dll         0x7ffc2b790000  manual    loaded    C:\...\payload.dll
+
+> XenosCli64 eject 7
+handle #7 ejected
+
+> XenosCli64 reinject 7
+re-injected 'payload.dll' into PID 4242 (handle #8)
+```
+
+Safety checks before ejecting:
+
+- PID **and** process creation time must match (PID reuse is detected).
+- The module base must still contain a PE image with the recorded size.
+- The loader name must match before `FreeLibrary`.
+- Stale handles are marked `stale`; `--force` bypasses the identity checks.
+
+Normal modules are unloaded with `FreeLibrary` inside the target.
+Manually mapped modules get `DllMain(DLL_PROCESS_DETACH)` and are then released
+with `VirtualFreeEx` (best-effort: code still executing in the DLL can crash
+the target, just like any unload).
+
+Re-inject first ejects the old handle and any other tracked instance of the
+same image in that process, then injects with the original method/options.
+The old handle remains in the history; the new injection gets a new handle.
+
+The GUI exposes the same list under **Tools > Tracked injections...** with
+**Eject** and **Re-inject** buttons. The Modules dialog uses the same safe
+unload path. The status bar shows the handle after a successful injection.
 
 Both the CLI and the GUI are front-ends to the same core; the GUI is a thin
 shell around the picker and `InjectionCore`.

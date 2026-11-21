@@ -22,6 +22,7 @@
 #include "../AppSettings.h"
 #include "../EngineDetect.h"
 #include "../InjectionCore.h"
+#include "../InjectionRegistry.h"
 #include "../Message.hpp"
 #include "../ProcessCatalog.h"
 #include "../DriverExtract.h"
@@ -173,6 +174,7 @@ namespace
         int period = 0;
         int timeoutSec = 30;
         bool dryRun = false;
+        bool force = false;
     };
 
     bool ParseMode( const std::wstring& value, PickerMode& mode )
@@ -358,6 +360,10 @@ namespace
             {
                 options.dryRun = true;
             }
+            else if (arg == L"--force")
+            {
+                options.force = true;
+            }
             else if (arg == L"--help" || arg == L"-h" || arg == L"/?")
             {
                 options.positional.emplace_back( L"--help" );
@@ -389,6 +395,9 @@ namespace
             L"  XenosCli forget\n"
             L"  XenosCli recent\n"
             L"  XenosCli engines\n"
+            L"  XenosCli injections [--pid N] [--json]\n"
+            L"  XenosCli eject <handle> [--force] [--json]\n"
+            L"  XenosCli reinject <handle> [--json]\n"
             L"\n"
             L"Injection:\n"
             L"  XenosCli inject --dll <path> [--dll <path> ...] [target] [options]\n"
@@ -655,6 +664,145 @@ namespace
         Out( L"%zu engine rule(s)\n", engine::Detector::Instance().RuleCount() );
         Out( L"Extend them with engines.ini next to the executable or in %%APPDATA%%\\Xenos.\n" );
         return 0;
+    }
+
+    int CommandInjections( const Options& options )
+    {
+        auto records = InjectionRegistry::Instance().All();
+
+        const DWORD pidFilter = options.targetPid.empty() ? 0 :
+            static_cast<DWORD>( _wtoi( options.targetPid.c_str() ) );
+
+        if (options.json)
+        {
+            Out( L"[\n" );
+            bool first = true;
+
+            for (auto& record : records)
+            {
+                if (pidFilter != 0 && record.pid != pidFilter)
+                    continue;
+
+                if (!first)
+                    Out( L",\n" );
+                first = false;
+
+                const bool live = IsInjectionLive( record );
+                const wchar_t* state = record.state == static_cast<int>( InjectionState::Ejected ) ? L"ejected" :
+                    live ? L"loaded" : L"stale";
+
+                Out(
+                    L"  {\"handle\":%u,\"pid\":%lu,\"module\":\"%ls\",\"base\":\"0x%llx\","
+                    L"\"method\":\"%ls\",\"manual\":%ls,\"state\":\"%ls\",\"path\":\"%ls\"}",
+                    record.id,
+                    record.pid,
+                    JsonEscape( record.moduleName ).c_str(),
+                    static_cast<unsigned long long>( record.baseAddress ),
+                    MethodName( record.method ),
+                    record.manual ? L"true" : L"false",
+                    state,
+                    JsonEscape( record.imagePath ).c_str() );
+            }
+
+            Out( L"\n]\n" );
+            return 0;
+        }
+
+        Out( L"%6ls  %6ls  %-28ls  %-12ls  %-9ls  %-8ls  %ls\n",
+             L"HANDLE", L"PID", L"MODULE", L"BASE", L"METHOD", L"STATE", L"IMAGE" );
+
+        for (auto& record : records)
+        {
+            if (pidFilter != 0 && record.pid != pidFilter)
+                continue;
+
+            const bool live = IsInjectionLive( record );
+            const wchar_t* state = record.state == static_cast<int>( InjectionState::Ejected ) ? L"ejected" :
+                live ? L"loaded" : L"stale";
+
+            wchar_t base[32] = { 0 };
+            swprintf_s( base, L"0x%llx", static_cast<unsigned long long>( record.baseAddress ) );
+
+            Out( L"#%-5u  %6lu  %-28ls  %-12ls  %-9ls  %-8ls  %ls\n",
+                 record.id,
+                 record.pid,
+                 record.moduleName.c_str(),
+                 base,
+                 MethodName( record.method ),
+                 state,
+                 record.imagePath.c_str() );
+        }
+
+        return 0;
+    }
+
+    int CommandEject( const Options& options )
+    {
+        if (options.positional.empty())
+        {
+            Err( L"eject requires a handle (use 'injections' to list them)\n" );
+            return 2;
+        }
+
+        const uint32_t id = static_cast<uint32_t>( _wtoi( options.positional.front().c_str() ) );
+        std::wstring message;
+        const EjectStatus status = EjectInjection( id, options.force, message );
+        const bool ok = status == EjectStatus::Ok || status == EjectStatus::AlreadyGone;
+
+        if (options.json)
+        {
+            Out( L"{\"handle\":%u,\"ok\":%ls,\"status\":\"%ls\",\"message\":\"%ls\"}\n",
+                 id,
+                 ok ? L"true" : L"false",
+                 EjectStatusText( status ),
+                 JsonEscape( message ).c_str() );
+        }
+        else if (ok)
+        {
+            Out( L"%ls\n", message.c_str() );
+        }
+        else
+        {
+            Err( L"%ls\n", message.c_str() );
+        }
+
+        if (ok)
+            return 0;
+
+        return status == EjectStatus::NotFound ? 1 : 3;
+    }
+
+    int CommandReinject( const Options& options )
+    {
+        if (options.positional.empty())
+        {
+            Err( L"reinject requires a handle (use 'injections' to list them)\n" );
+            return 2;
+        }
+
+        const uint32_t id = static_cast<uint32_t>( _wtoi( options.positional.front().c_str() ) );
+        uint32_t newId = 0;
+        std::wstring message;
+        const bool ok = ReinjectInjection( id, nullptr, newId, message );
+
+        if (options.json)
+        {
+            Out( L"{\"handle\":%u,\"ok\":%ls,\"newHandle\":%u,\"message\":\"%ls\"}\n",
+                 id,
+                 ok ? L"true" : L"false",
+                 newId,
+                 JsonEscape( message ).c_str() );
+        }
+        else if (ok)
+        {
+            Out( L"%ls\n", message.c_str() );
+        }
+        else
+        {
+            Err( L"%ls\n", message.c_str() );
+        }
+
+        return ok ? 0 : 3;
     }
 
     int CommandGui( const Options& options )
@@ -993,19 +1141,41 @@ namespace
             return 3;
         }
 
+        std::wstring handles;
+        for (auto& id : context.injectionIds)
+        {
+            if (!handles.empty())
+                handles += L", ";
+
+            handles += L"#" + id;
+        }
+
         if (options.json)
         {
-            Out( L"{\"ok\":true,\"pid\":%lu,\"name\":\"%ls\",\"path\":\"%ls\",\"method\":\"%ls\",\"images\":%zu}\n",
+            Out( L"{\"ok\":true,\"pid\":%lu,\"name\":\"%ls\",\"path\":\"%ls\",\"method\":\"%ls\",\"images\":%zu,\"handles\":[",
                  context.pid,
                  JsonEscape( target.name ).c_str(),
                  JsonEscape( target.path ).c_str(),
                  MethodName( options.method ),
                  paths.size() );
+
+            for (size_t i = 0; i < context.injectionIds.size(); i++)
+            {
+                if (i)
+                    Out( L"," );
+
+                Out( L"%ls", context.injectionIds[i].c_str() );
+            }
+
+            Out( L"]}\n" );
         }
         else
         {
             Out( L"injected %zu image(s) into %ls (%lu) using %ls\n",
                  paths.size(), target.name.c_str(), context.pid, MethodName( options.method ) );
+
+            if (!handles.empty())
+                Out( L"handles: %ls\n", handles.c_str() );
         }
 
         return 0;
@@ -1068,6 +1238,12 @@ int wmain( int argc, wchar_t** argv )
         return CommandRecent( options );
     if (command == L"engines")
         return CommandEngines( options );
+    if (command == L"injections" || command == L"handles")
+        return CommandInjections( options );
+    if (command == L"eject")
+        return CommandEject( options );
+    if (command == L"reinject")
+        return CommandReinject( options );
     if (command == L"inject")
         return CommandInject( options );
     if (command == L"help")

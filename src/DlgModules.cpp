@@ -1,4 +1,5 @@
 #include "DlgModules.h"
+#include "InjectionRegistry.h"
 #include "Message.hpp"
 
 
@@ -54,24 +55,30 @@ INT_PTR ModulesDlg::OnUnload( HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
     if (_process.valid())
     {
         wchar_t* pEnd = nullptr;
-        blackbone::module_t modBase = wcstoull( _modList.itemText( idx, ImageBase ).c_str(), &pEnd, 0x10 );
-        auto mod = _process.modules().GetModule( modBase );
-        auto barrier = _process.core().native()->GetWow64Barrier();
+        const uint64_t modBase = wcstoull( _modList.itemText( idx, ImageBase ).c_str(), &pEnd, 0x10 );
 
-        // Validate module
-        if (barrier.type == blackbone::wow_32_32 && mod->type == blackbone::mt_mod64)
+        auto info = _moduleInfo.find( modBase );
+        if (info == _moduleInfo.end())
         {
-            Message::ShowError( hDlg, L"Please use Xenos64.exe to unload 64 bit modules from WOW64 process" );
+            Message::ShowError( hDlg, L"Module information is not available, refresh the list" );
             return TRUE;
         }
 
-        if (mod != nullptr)
-        {
-            _process.modules().Unload( mod );
+        std::wstring message;
+        auto status = UnloadModuleAt(
+            _process,
+            modBase,
+            info->second.name,
+            info->second.path,
+            info->second.manual,
+            0,
+            false,
+            message );
+
+        if (status == EjectStatus::Ok || status == EjectStatus::AlreadyGone)
             RefreshList();
-        }
         else
-            Message::ShowError( hDlg, L"Module not found" );
+            Message::ShowError( hDlg, message );
     }
 
     return TRUE;
@@ -84,6 +91,8 @@ INT_PTR ModulesDlg::OnUnload( HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 void ModulesDlg::RefreshList( )
 {
     _modList.reset();
+    _moduleInfo.clear();
+
     if (!_process.valid())
         return;
 
@@ -131,5 +140,11 @@ void ModulesDlg::RefreshList( )
             detected = L"Unknown";
 
         _modList.AddItem( mod.second->name, static_cast<LPARAM>(mod.second->baseAddress), { address, platfom, detected } );
+
+        ModuleInfo info;
+        info.name = mod.second->name;
+        info.path = mod.second->fullPath;
+        info.manual = mod.second->manual;
+        _moduleInfo[mod.second->baseAddress] = std::move( info );
     }
 }

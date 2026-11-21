@@ -210,14 +210,19 @@
     <ClCompile Include="MainDlg.cpp" />
     <ClCompile Include="Routines.cpp" />
     <ClCompile Include="DlgModules.cpp" />
+    <ClCompile Include="DlgInjections.cpp" />
     <ClCompile Include="AppSettings.cpp" />
+    <ClCompile Include="AppPaths.cpp" />
     <ClCompile Include="EngineDetect.cpp" />
+    <ClCompile Include="InjectionRegistry.cpp" />
     <ClCompile Include="ProcessCatalog.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Button.hpp" />
     <ClInclude Include="AppSettings.h" />
+    <ClInclude Include="AppPaths.h" />
     <ClInclude Include="EngineDetect.h" />
+    <ClInclude Include="InjectionRegistry.h" />
     <ClInclude Include="ProcessCatalog.h" />
     <ClInclude Include="ComboBox.hpp" />
     <ClInclude Include="DriverExtract.h" />
@@ -226,6 +231,7 @@
     <ClInclude Include="Control.hpp" />
     <ClInclude Include="Dialog.hpp" />
     <ClInclude Include="DlgModules.h" />
+    <ClInclude Include="DlgInjections.h" />
     <ClInclude Include="DlgSettings.h" />
     <ClInclude Include="DlgWait.h" />
     <ClInclude Include="DumpHandler.h" />

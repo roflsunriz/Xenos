@@ -82,16 +82,20 @@
   <ItemGroup>
     <ClCompile Include="XenosCli.cpp" />
     <ClCompile Include="..\AppSettings.cpp" />
+    <ClCompile Include="..\AppPaths.cpp" />
     <ClCompile Include="..\EngineDetect.cpp" />
     <ClCompile Include="..\FileUtil.cpp" />
     <ClCompile Include="..\InjectionCore.cpp" />
+    <ClCompile Include="..\InjectionRegistry.cpp" />
     <ClCompile Include="..\ProcessCatalog.cpp" />
     <ClCompile Include="..\ProfileMgr.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\AppSettings.h" />
+    <ClInclude Include="..\AppPaths.h" />
     <ClInclude Include="..\EngineDetect.h" />
     <ClInclude Include="..\InjectionCore.h" />
+    <ClInclude Include="..\InjectionRegistry.h" />
     <ClInclude Include="..\ProcessCatalog.h" />
     <ClInclude Include="..\ProfileMgr.h" />
   </ItemGroup>

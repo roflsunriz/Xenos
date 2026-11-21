@@ -45,6 +45,7 @@ struct InjectContext
     bool waitActive = false;                        // Process waiting state
     std::vector<blackbone::ProcessInfo> procList;   // Process list
     std::vector<blackbone::ProcessInfo> procDiff;   // Created processes list
+    std::vector<std::wstring> injectionIds;         // Handles of successful injections
 };
 
 class InjectionCore

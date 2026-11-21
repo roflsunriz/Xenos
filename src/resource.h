@@ -18,6 +18,7 @@
 #define IDR_DRV81                       149
 #define IDR_DRIVER1                     150
 #define IDR_DRV10                       150
+#define IDD_INJECTIONS                  151
 #define IDC_EDIT_MAIN                   1000
 #define IDC_EXECUTE                     1001
 #define IDC_COMBO_PROC                  1002
@@ -65,6 +66,12 @@
 #define IDC_SKIP                        1032
 #define IDC_GAMES_PROC                  1033
 #define IDC_RECENT_PROC                 1034
+#define IDC_TRACKED_LIST                1040
+#define IDC_TRACKED_EJECT               1041
+#define IDC_TRACKED_REINJECT            1042
+#define IDC_TRACKED_REFRESH             1043
+#define IDC_TRACKED_CLOSE               1044
+#define ID_TOOLS_INJECTIONS             32779
 #define ID_TOOLS_EJECTMODULES           32772
 #define ID_TOOLS_PROTECTSELF            32773
 #define ID_TOOLS_PROTECT                32774
@@ -81,9 +88,9 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        151
+#define _APS_NEXT_RESOURCE_VALUE        152
 #define _APS_NEXT_COMMAND_VALUE         32783
-#define _APS_NEXT_CONTROL_VALUE         1035
+#define _APS_NEXT_CONTROL_VALUE         1045
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

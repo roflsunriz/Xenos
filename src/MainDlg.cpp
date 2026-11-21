@@ -37,6 +37,7 @@ MainDlg::MainDlg( MainDlg::StartAction action, const std::wstring& defConfig /*=
     _events[ID_PROFILES_SAVE]       = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSaveProfile);
     _events[ID_TOOLS_PROTECT]       = static_cast<Dialog::fnDlgProc>(&MainDlg::OnProtectSelf);
     _events[ID_TOOLS_EJECTMODULES]  = static_cast<Dialog::fnDlgProc>(&MainDlg::OnEjectModules);
+    _events[ID_TOOLS_INJECTIONS]    = static_cast<Dialog::fnDlgProc>(&MainDlg::OnTrackedInjections);
 
     // Accelerators
     _events[ID_ACCEL_OPEN]          = static_cast<Dialog::fnDlgProc>(&MainDlg::OnLoadProfile);
@@ -530,6 +531,13 @@ INT_PTR MainDlg::OnSaveProfile( HWND hDlg, UINT message, WPARAM wParam, LPARAM l
         _status.SetText( 0, blackbone::Utils::StripPath( path ) );
     }
 
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnTrackedInjections( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    DlgInjections dlg;
+    dlg.RunModal( hDlg );
     return TRUE;
 }
 

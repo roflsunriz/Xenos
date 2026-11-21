@@ -7,6 +7,9 @@
 #include <BlackBone/src/BlackBone/Process/Process.h>
 #include <BlackBone/src/BlackBone/Misc/Utils.h>
 
+#include <map>
+#include <string>
+
 class ModulesDlg : public Dialog
 {
     enum ColumnID
@@ -32,6 +35,14 @@ private:
     MSG_HANDLER( OnUnload );
 
 private:
+    struct ModuleInfo
+    {
+        std::wstring name;
+        std::wstring path;
+        bool manual = false;
+    };
+
     ctrl::ListView _modList;
     blackbone::Process& _process;
+    std::map<uint64_t, ModuleInfo> _moduleInfo;
 };

@@ -1,4 +1,5 @@
 #include "InjectionCore.h"
+#include "InjectionRegistry.h"
 #include <BlackBone/src/BlackBone/Process/RPC/RemoteFunction.hpp>
 #include <iterator>
 
@@ -639,7 +640,55 @@ NTSTATUS InjectionCore::InjectSingle( InjectContext& context, blackbone::pe::PEI
             status = ERROR_FUNCTION_FAILED;
             Message::ShowError( _hMainDlg, L"Failed to unlink module '" + img.path() + L"'" );
         }
-    
+
+    // Track the injection so it can be safely ejected/re-injected later
+    if (NT_SUCCESS( status ) && context.cfg.injectMode != Kernel_DriverMap)
+    {
+        blackbone::ModuleDataPtr tracked = mod;
+
+        if (!tracked && (context.cfg.injectMode == Kernel_Thread || context.cfg.injectMode == Kernel_APC))
+            tracked = _process.modules().GetModule( img.name(), blackbone::LdrList );
+
+        if (!tracked)
+        {
+            auto manuals = _process.modules().GetManualModules();
+            for (auto& item : manuals)
+            {
+                if (_wcsicmp( item.second->name.c_str(), img.name().c_str() ) == 0)
+                {
+                    tracked = item.second;
+                    break;
+                }
+            }
+        }
+
+        if (tracked)
+        {
+            NewInjection record;
+            record.pid         = context.pid;
+            record.imagePath   = img.path();
+            record.moduleName  = tracked->name.empty() ? img.name() : tracked->name;
+            record.baseAddress = tracked->baseAddress;
+            record.imageSize   = tracked->size;
+            record.method      = context.cfg.injectMode;
+            record.manual      = tracked->manual || context.cfg.injectMode == Manual ||
+                                 context.cfg.injectMode == Kernel_MMap;
+            record.mmapFlags   = context.cfg.mmapFlags;
+            record.initRoutine = context.cfg.initRoutine;
+            record.initArgs    = context.cfg.initArgs;
+            record.unlink      = context.cfg.unlink;
+            record.hijack      = context.cfg.hijack;
+            record.erasePE     = context.cfg.erasePE;
+            record.krnHandle   = context.cfg.krnHandle;
+            record.delay       = context.cfg.delay;
+            record.period      = context.cfg.period;
+
+            const uint32_t id = InjectionRegistry::Instance().Add( record );
+            if (id != 0)
+                context.injectionIds.emplace_back( std::to_wstring( id ) );
+        }
+    }
+
     return status;
 }
 

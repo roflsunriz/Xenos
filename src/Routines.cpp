@@ -295,7 +295,24 @@ void MainDlg::Inject()
     }
 
     _inject.enable();
-    _status.SetText( 2, L"Idle" );
+
+    if (NT_SUCCESS( status ) && !context.injectionIds.empty())
+    {
+        std::wstring handles;
+        for (auto& id : context.injectionIds)
+        {
+            if (!handles.empty())
+                handles += L", ";
+
+            handles += L"#" + id;
+        }
+
+        _status.SetText( 2, L"Injected " + handles );
+    }
+    else
+    {
+        _status.SetText( 2, L"Idle" );
+    }
 }
 
 /// <summary>

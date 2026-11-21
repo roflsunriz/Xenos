@@ -2,6 +2,7 @@
 
 #include "resource.h"
 #include "DlgModules.h"
+#include "DlgInjections.h"
 #include "DlgWait.h"
 #include "DlgSettings.h"
 #include "ProfileMgr.h"
@@ -188,6 +189,7 @@ private:
     MSG_HANDLER( OnSaveProfile );
 
     MSG_HANDLER( OnEjectModules );
+    MSG_HANDLER( OnTrackedInjections );
     MSG_HANDLER( OnProtectSelf );
 
 private:
