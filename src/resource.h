@@ -71,6 +71,7 @@
 #define IDC_TRACKED_REINJECT            1042
 #define IDC_TRACKED_REFRESH             1043
 #define IDC_TRACKED_CLOSE               1044
+#define IDC_EJECT                       1045
 #define ID_TOOLS_INJECTIONS             32779
 #define ID_TOOLS_EJECTMODULES           32772
 #define ID_TOOLS_PROTECTSELF            32773
@@ -90,7 +91,7 @@
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        152
 #define _APS_NEXT_COMMAND_VALUE         32783
-#define _APS_NEXT_CONTROL_VALUE         1045
+#define _APS_NEXT_CONTROL_VALUE         1046
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

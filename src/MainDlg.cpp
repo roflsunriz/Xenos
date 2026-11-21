@@ -26,6 +26,7 @@ MainDlg::MainDlg( MainDlg::StartAction action, const std::wstring& defConfig /*=
     _events[IDC_ADD_MOD]            = static_cast<Dialog::fnDlgProc>(&MainDlg::OnLoadImage);
     _events[IDC_REMOVE_MOD]         = static_cast<Dialog::fnDlgProc>(&MainDlg::OnRemoveImage);
     _events[IDC_CLEAR_MODS]         = static_cast<Dialog::fnDlgProc>(&MainDlg::OnClearImages);
+    _events[IDC_EJECT]              = static_cast<Dialog::fnDlgProc>(&MainDlg::OnEjectTracked);
     _events[CBN_DROPDOWN]           = static_cast<Dialog::fnDlgProc>(&MainDlg::OnDropDown);
     _events[CBN_SELCHANGE]          = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSelChange);
     _events[CBN_EDITCHANGE]         = static_cast<Dialog::fnDlgProc>(&MainDlg::OnFilterChange);
@@ -64,6 +65,7 @@ INT_PTR MainDlg::OnInit( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
     _selectProc.Attach( _hwnd, IDC_SELECT_PROC );
     _modules.Attach( _hwnd, IDC_MODS );
     _inject.Attach( _hwnd, IDC_EXECUTE );
+    _eject.Attach( _hwnd, IDC_EJECT );
 
     // Wide drop-down so engine tags are readable
     SendMessageW( _procList.hwnd(), CB_SETDROPPEDWIDTH, 560, 0 );
@@ -534,10 +536,92 @@ INT_PTR MainDlg::OnSaveProfile( HWND hDlg, UINT message, WPARAM wParam, LPARAM l
     return TRUE;
 }
 
+INT_PTR MainDlg::OnEjectTracked( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    const DWORD pid = SelectedPid();
+    if (pid == 0)
+    {
+        Message::ShowInfo( hDlg, L"Select a running process first" );
+        return TRUE;
+    }
+
+    auto records = InjectionRegistry::Instance().ForPid( pid );
+    std::vector<InjectionRecord> loaded;
+
+    for (auto& record : records)
+    {
+        if (record.state != static_cast<int>( InjectionState::Loaded ))
+            continue;
+
+        if (!IsInjectionLive( record ))
+        {
+            InjectionRegistry::Instance().SetState( record.id, InjectionState::Stale );
+            continue;
+        }
+
+        loaded.emplace_back( record );
+    }
+
+    if (loaded.empty())
+    {
+        Message::ShowInfo( hDlg, L"No loaded tracked DLLs for this process.\n"
+                                 L"Use Tools > Tracked injections... to review the history." );
+        UpdateInterface();
+        return TRUE;
+    }
+
+    std::wstring target = _procList.selectedText();
+    auto pos = target.find( L" (" );
+    if (pos != std::wstring::npos)
+        target.resize( pos );
+
+    wchar_t question[512] = { 0 };
+    swprintf_s( question, L"Eject %zu tracked DLL(s) from %ls (PID %lu)?",
+                loaded.size(), target.c_str(), pid );
+
+    if (!Message::ShowQuestion( hDlg, question ))
+        return TRUE;
+
+    std::wstring ejected;
+    std::wstring failed;
+
+    for (auto& record : loaded)
+    {
+        std::wstring error;
+        const EjectStatus status = EjectInjection( record.id, false, error );
+
+        if (status == EjectStatus::Ok || status == EjectStatus::AlreadyGone)
+        {
+            if (!ejected.empty())
+                ejected += L", ";
+
+            ejected += L"#" + std::to_wstring( record.id );
+        }
+        else
+        {
+            if (!failed.empty())
+                failed += L"\n";
+
+            failed += L"#" + std::to_wstring( record.id ) + L": " + error;
+        }
+    }
+
+    if (!ejected.empty())
+        _status.SetText( 2, L"Ejected " + ejected );
+
+    if (!failed.empty())
+        Message::ShowError( hDlg, L"Some modules could not be ejected:\n" + failed );
+
+    UpdateInterface();
+    return TRUE;
+}
+
 INT_PTR MainDlg::OnTrackedInjections( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
 {
     DlgInjections dlg;
     dlg.RunModal( hDlg );
+
+    UpdateInterface();
     return TRUE;
 }
 

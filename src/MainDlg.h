@@ -15,6 +15,7 @@
 #include "EngineDetect.h"
 #include "AppSettings.h"
 #include "ProcessCatalog.h"
+#include "InjectionRegistry.h"
 
 #include "Log.h"
 
@@ -190,6 +191,7 @@ private:
 
     MSG_HANDLER( OnEjectModules );
     MSG_HANDLER( OnTrackedInjections );
+    MSG_HANDLER( OnEjectTracked );
     MSG_HANDLER( OnProtectSelf );
 
 private:
@@ -225,4 +227,5 @@ private:
     ctrl::Button _autoProc;         // Manual launch radio-button
     ctrl::Button _selectProc;       // Select process path
     ctrl::Button _inject;           // Inject button
+    ctrl::Button _eject;            // Eject tracked DLLs button
 };

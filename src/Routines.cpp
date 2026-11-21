@@ -313,6 +313,8 @@ void MainDlg::Inject()
     {
         _status.SetText( 2, L"Idle" );
     }
+
+    UpdateInterface();
 }
 
 /// <summary>
@@ -360,6 +362,25 @@ DWORD MainDlg::UpdateInterface( )
         _inject.disable();
     else
         _inject.enable();
+
+    // Eject is available when the selected process has tracked loaded handles
+    bool canEject = false;
+    if (attachMode && SelectedPid() != 0)
+    {
+        for (auto& record : InjectionRegistry::Instance().ForPid( SelectedPid() ))
+        {
+            if (record.state == static_cast<int>( InjectionState::Loaded ))
+            {
+                canEject = true;
+                break;
+            }
+        }
+    }
+
+    if (canEject)
+        _eject.enable();
+    else
+        _eject.disable();
 
     return ERROR_SUCCESS;
 }

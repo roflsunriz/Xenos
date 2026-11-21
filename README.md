@@ -197,8 +197,10 @@ same image in that process, then injects with the original method/options.
 The old handle remains in the history; the new injection gets a new handle.
 
 The GUI exposes the same list under **Tools > Tracked injections...** with
-**Eject** and **Re-inject** buttons. The Modules dialog uses the same safe
-unload path. The status bar shows the handle after a successful injection.
+**Eject** and **Re-inject** buttons. The main window also has an **Eject**
+button that safely unloads every tracked DLL of the selected process (with a
+confirmation prompt). The Modules dialog uses the same safe unload path. The
+status bar shows the handle after a successful injection.
 
 Both the CLI and the GUI are front-ends to the same core; the GUI is a thin
 shell around the picker and `InjectionCore`.
