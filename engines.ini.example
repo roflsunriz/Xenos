@@ -1,0 +1,51 @@
+; Xenos engine fingerprint rules (optional)
+;
+; Place this file next to Xenos64.exe as "engines.ini", or in
+; %APPDATA%\Xenos\engines.ini. Built-in rules (Unity, Unreal, Godot,
+; GameMaker, RPG Maker, Ren'Py, Source, Source 2, CryEngine, ...) always apply;
+; these sections only add or extend engines.
+;
+; Every key is optional. Paths in "files" and "dirs" are relative to the
+; target executable's directory; wildcards (*, ?) and ".." are supported.
+; "modules" and "exes" are matched against loaded module / image names.
+;
+; Scoring: each field that matches at least once adds its weight. A rule is
+; accepted when the total reaches "minscore". game=0 marks a runtime (hidden
+; by the Games picker).
+
+; ---------------------------------------------------------------------------
+; Example: a custom engine with a launcher and a data directory
+; ---------------------------------------------------------------------------
+;[MyEngine]
+;engine=My Engine             ; display name (defaults to the section name)
+;variant=Retail               ; optional, appended to the display name
+;game=1                       ; 1 = game engine, 0 = runtime/launcher
+;
+;modules=MyEngine.dll, MyEngineCore*.dll
+;files=..\..\GameData\*.mypak, launcher.cfg
+;dirs=GameData, ..\..\GameData
+;exes=MyGame-*.exe
+;
+;weight.modules=70
+;weight.files=50
+;weight.dirs=40
+;weight.exes=65
+;minscore=40
+
+; ---------------------------------------------------------------------------
+; Example: tag a specific game family by executable name only
+; ---------------------------------------------------------------------------
+;[Creation Engine]
+;engine=Creation Engine
+;exes=Fallout4.exe, SkyrimSE.exe, Starfield.exe
+;weight.exes=100
+;minscore=100
+
+; ---------------------------------------------------------------------------
+; Example: a runtime we do not want in the Games list
+; ---------------------------------------------------------------------------
+;[MyLauncher]
+;engine=My Launcher
+;game=0
+;files=launcher.dat
+;minscore=50

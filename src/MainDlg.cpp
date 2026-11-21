@@ -19,6 +19,8 @@ MainDlg::MainDlg( MainDlg::StartAction action, const std::wstring& defConfig /*=
     _events[IDC_SETTINGS]           = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSettings);
     _events[IDC_NEW_PROC]           = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSelectExecutable);
     _events[IDC_EXISTING_PROC]      = static_cast<Dialog::fnDlgProc>(&MainDlg::OnExistingProcess);
+    _events[IDC_GAMES_PROC]         = static_cast<Dialog::fnDlgProc>(&MainDlg::OnGamesProcess);
+    _events[IDC_RECENT_PROC]        = static_cast<Dialog::fnDlgProc>(&MainDlg::OnRecentProcess);
     _events[IDC_AUTO_PROC]          = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSelectExecutable);
     _events[IDC_SELECT_PROC]        = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSelectExecutable);
     _events[IDC_ADD_MOD]            = static_cast<Dialog::fnDlgProc>(&MainDlg::OnLoadImage);
@@ -26,6 +28,11 @@ MainDlg::MainDlg( MainDlg::StartAction action, const std::wstring& defConfig /*=
     _events[IDC_CLEAR_MODS]         = static_cast<Dialog::fnDlgProc>(&MainDlg::OnClearImages);
     _events[CBN_DROPDOWN]           = static_cast<Dialog::fnDlgProc>(&MainDlg::OnDropDown);
     _events[CBN_SELCHANGE]          = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSelChange);
+    _events[CBN_EDITCHANGE]         = static_cast<Dialog::fnDlgProc>(&MainDlg::OnFilterChange);
+    _events[CBN_SETFOCUS]           = static_cast<Dialog::fnDlgProc>(&MainDlg::OnFilterFocus);
+    _events[ID_VIEW_REFRESH]        = static_cast<Dialog::fnDlgProc>(&MainDlg::OnRefreshProcessList);
+    _events[ID_VIEW_CLEARCACHE]     = static_cast<Dialog::fnDlgProc>(&MainDlg::OnClearEngineCache);
+    _messages[WM_APP_REFRESH_PROCESSES] = static_cast<Dialog::fnDlgProc>(&MainDlg::OnDeferredInit);
     _events[ID_PROFILES_OPEN]       = static_cast<Dialog::fnDlgProc>(&MainDlg::OnLoadProfile);
     _events[ID_PROFILES_SAVE]       = static_cast<Dialog::fnDlgProc>(&MainDlg::OnSaveProfile);
     _events[ID_TOOLS_PROTECT]       = static_cast<Dialog::fnDlgProc>(&MainDlg::OnProtectSelf);
@@ -49,11 +56,30 @@ INT_PTR MainDlg::OnInit( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
     //
     _procList.Attach( _hwnd, IDC_COMBO_PROC );
     _exProc.Attach( _hwnd, IDC_EXISTING_PROC );
+    _gamesProc.Attach( _hwnd, IDC_GAMES_PROC );
+    _recentProc.Attach( _hwnd, IDC_RECENT_PROC );
     _newProc.Attach( _hwnd, IDC_NEW_PROC );
     _autoProc.Attach(_hwnd, IDC_AUTO_PROC );
     _selectProc.Attach( _hwnd, IDC_SELECT_PROC );
     _modules.Attach( _hwnd, IDC_MODS );
     _inject.Attach( _hwnd, IDC_EXECUTE );
+
+    // Wide drop-down so engine tags are readable
+    SendMessageW( _procList.hwnd(), CB_SETDROPPEDWIDTH, 560, 0 );
+
+    // Subclass the combo edit so Enter/Esc work while typing a filter
+    COMBOBOXINFO comboInfo = { 0 };
+    comboInfo.cbSize = sizeof( comboInfo );
+    if (GetComboBoxInfo( _procList.hwnd(), &comboInfo ) && comboInfo.hwndItem)
+    {
+        _comboEdit.Attach( comboInfo.hwndItem );
+        _comboEdit.Subclass(
+            WM_KEYDOWN,
+            static_cast<Window::fnWndProc>(&MainDlg::OnComboEditKey),
+            this );
+    }
+
+    AppSettings::Instance().Load();
 
     // Setup modules view
     _modules.AddColumn( L"Name", 150, 0 );
@@ -94,6 +120,164 @@ INT_PTR MainDlg::OnInit( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
 
     LoadConfig( _defConfig );
 
+    PostMessageW( _hwnd, WM_APP_REFRESH_PROCESSES, 0, 0 );
+
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnCommand( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    // IDOK/IDCANCEL are small integers that collide with combo-box
+    // notification codes, so handle them before the generic dispatcher.
+    if (HIWORD( wParam ) == 0)
+    {
+        if (LOWORD( wParam ) == IDOK)
+            return OnCommitFilter( hDlg, message, wParam, lParam );
+
+        if (LOWORD( wParam ) == IDCANCEL)
+            return OnCancelFilter( hDlg, message, wParam, lParam );
+    }
+
+    return Dialog::OnCommand( hDlg, message, wParam, lParam );
+}
+
+INT_PTR MainDlg::OnDeferredInit( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    FillProcessList();
+    UpdateInterface();
+
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnFilterFocus( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    // Replace the displayed selection with the next typed character
+    SelectAllComboText();
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnComboEditKey( HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    if (wParam == VK_RETURN)
+    {
+        CommitFilterSelection();
+        return 0;
+    }
+
+    if (wParam == VK_ESCAPE)
+    {
+        if (!_filterText.empty())
+        {
+            _filterText.clear();
+
+            _suppressFilter = true;
+            _procList.selectedText( L"" );
+            _suppressFilter = false;
+
+            RebuildProcessList( 0, true );
+            return 0;
+        }
+    }
+
+    return CallWindowProcW( _comboEdit.oldProc(), hWnd, message, wParam, lParam );
+}
+
+INT_PTR MainDlg::OnFilterChange( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    if (_suppressFilter || _rebuilding)
+        return TRUE;
+
+    _filterText = _procList.selectedText();
+    RebuildProcessList( SelectedPid(), false );
+
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnCommitFilter( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    CommitFilterSelection();
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnCancelFilter( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    // First Esc clears the filter, second one closes the dialog
+    if (!_filterText.empty())
+    {
+        _filterText.clear();
+        _suppressFilter = true;
+        _procList.selectedText( L"" );
+        _suppressFilter = false;
+
+        RebuildProcessList( 0, true );
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+INT_PTR MainDlg::OnExistingProcess( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    SetPickerMode( PickerMode::All );
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnGamesProcess( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    SetPickerMode( PickerMode::Games );
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnRecentProcess( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    SetPickerMode( PickerMode::Recent );
+    return TRUE;
+}
+
+PickerMode MainDlg::CurrentPickerMode() const
+{
+    if (_gamesProc.checked())
+        return PickerMode::Games;
+
+    if (_recentProc.checked())
+        return PickerMode::Recent;
+
+    return PickerMode::All;
+}
+
+void MainDlg::SetPickerMode( PickerMode mode )
+{
+    auto& settings = AppSettings::Instance();
+    settings.pickerMode = mode;
+    settings.Save();
+
+    _exProc.checked( mode == PickerMode::All );
+    _gamesProc.checked( mode == PickerMode::Games );
+    _recentProc.checked( mode == PickerMode::Recent );
+    _newProc.checked( false );
+    _autoProc.checked( false );
+
+    _profileMgr.config().processMode = Existing;
+    _filterText.clear();
+
+    if (_catalog.Empty())
+        FillProcessList();
+    else
+        RebuildProcessList( 0, true );
+
+    UpdateInterface();
+}
+
+INT_PTR MainDlg::OnRefreshProcessList( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    FillProcessList();
+    return TRUE;
+}
+
+INT_PTR MainDlg::OnClearEngineCache( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
+{
+    engine::Detector::Instance().ClearCache();
+    FillProcessList();
     return TRUE;
 }
 
@@ -101,6 +285,8 @@ INT_PTR MainDlg::OnClose( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam 
 {
     if(_procList.selection() != -1 && !_images.empty())
         SaveConfig();
+
+    AppSettings::Instance().Save();
 
     return Dialog::OnClose( hDlg, message, wParam, lParam );
 }
@@ -116,16 +302,81 @@ INT_PTR MainDlg::OnDropDown( HWND hDlg, UINT message, WPARAM wParam, LPARAM lPar
 INT_PTR MainDlg::OnSelChange( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
 {
     // Process selection
-    if (LOWORD( wParam ) == IDC_COMBO_PROC)
+    if (LOWORD( wParam ) == IDC_COMBO_PROC && !_rebuilding)
     {
-        DWORD pid = (DWORD)_procList.itemData( _procList.selection() );
-        auto path = _procList.selectedText().substr( 0, _procList.selectedText().find( L'(' ) - 1 );
-
-        SetActiveProcess( pid, path );
-        UpdateInterface();
+        const DWORD pid = SelectedPid();
+        if (pid != 0)
+        {
+            const int index = IndexOfPid( pid );
+            if (index >= 0)
+                SelectVisibleItem( index, true );
+        }
     }
 
     return TRUE;
+}
+
+int MainDlg::IndexOfPid( DWORD pid ) const
+{
+    return proc::Catalog::FindPid( _visible, pid );
+}
+
+DWORD MainDlg::SelectedPid() const
+{
+    const int index = ComboBox_GetCurSel( _procList.hwnd() );
+    if (index < 0)
+        return 0;
+
+    return static_cast<DWORD>( ComboBox_GetItemData( _procList.hwnd(), index ) );
+}
+
+void MainDlg::SelectVisibleItem( int index, bool remember )
+{
+    if (index < 0 || index >= (int)_visible.size())
+        return;
+
+    const auto& entry = _visible[index];
+
+    _rebuilding = true;
+    ComboBox_SetCurSel( _procList.hwnd(), index );
+    _rebuilding = false;
+
+    SetActiveProcess( entry.pid, entry.path.empty() ? entry.name : entry.path );
+
+    if (remember)
+    {
+        auto& settings = AppSettings::Instance();
+        settings.RememberTarget( entry.name, entry.path );
+        settings.Save();
+
+        _restoreName.clear();
+        _filterText.clear();
+        SelectAllComboText();
+    }
+
+    UpdateInterface();
+}
+
+void MainDlg::SelectAllComboText()
+{
+    COMBOBOXINFO info = { 0 };
+    info.cbSize = sizeof( info );
+
+    if (GetComboBoxInfo( _procList.hwnd(), &info ) && info.hwndItem)
+        SendMessageW( info.hwndItem, EM_SETSEL, 0, -1 );
+}
+
+void MainDlg::CommitFilterSelection()
+{
+    // Enter while the list is open is handled by the combo box itself
+    if (ComboBox_GetDroppedState( _procList.hwnd() ))
+        return;
+
+    if (_filterText.empty() && SelectedPid() != 0)
+        return;
+
+    if (!_visible.empty())
+        SelectVisibleItem( 0, true );
 }
 
 INT_PTR MainDlg::OnLoadImage( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
@@ -176,6 +427,10 @@ INT_PTR MainDlg::OnClearImages( HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 
 INT_PTR MainDlg::OnExecute( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
 {
+    // Attach modes require a live PID
+    if (!_newProc.checked() && !_autoProc.checked() && SelectedPid() == 0)
+        return TRUE;
+
     std::lock_guard<std::mutex> lg( _lock );
     std::thread( &MainDlg::Inject, this ).detach();
     return TRUE;
@@ -200,17 +455,10 @@ INT_PTR MainDlg::OnSettings( HWND hDlg, UINT message, WPARAM wParam, LPARAM lPar
     DlgSettings dlg( _profileMgr );
     dlg.SetExports( diff );
 
-    _profileMgr.config().processMode = (_exProc ? Existing : (_newProc ? NewProcess : ManualLaunch));
+    _profileMgr.config().processMode =
+        (_newProc.checked() ? NewProcess : (_autoProc.checked() ? ManualLaunch : Existing));
 
     dlg.RunModal( hDlg );
-    UpdateInterface();
-    return TRUE;
-}
-
-INT_PTR MainDlg::OnExistingProcess( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
-{
-    _profileMgr.config().processMode = Existing;
-    _procList.reset();
     UpdateInterface();
     return TRUE;
 }
@@ -306,7 +554,7 @@ INT_PTR MainDlg::OnProtectSelf( HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 
 INT_PTR MainDlg::OnEjectModules( HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam )
 {
-    auto pid = _procList.itemData( _procList.selection() );
+    auto pid = SelectedPid();
 
     // Try attaching to current selection
     if (pid > 0 && _core.process().pid() != pid)

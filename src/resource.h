@@ -63,6 +63,8 @@
 #define IDC_CHECK1                      1031
 #define IDC_KRN_HANDLE                  1031
 #define IDC_SKIP                        1032
+#define IDC_GAMES_PROC                  1033
+#define IDC_RECENT_PROC                 1034
 #define ID_TOOLS_EJECTMODULES           32772
 #define ID_TOOLS_PROTECTSELF            32773
 #define ID_TOOLS_PROTECT                32774
@@ -70,6 +72,8 @@
 #define ID_PROFILES_SAVE                32776
 #define ID_ACCEL_SAVE                   32777
 #define ID_ACCEL_OPEN                   32778
+#define ID_VIEW_REFRESH                 32781
+#define ID_VIEW_CLEARCACHE              32782
 #define IDC_STATIC                      -1
 
 // Next default values for new objects
@@ -78,8 +82,8 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        151
-#define _APS_NEXT_COMMAND_VALUE         32780
-#define _APS_NEXT_CONTROL_VALUE         1032
+#define _APS_NEXT_COMMAND_VALUE         32783
+#define _APS_NEXT_CONTROL_VALUE         1035
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

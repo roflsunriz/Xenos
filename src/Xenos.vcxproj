@@ -210,9 +210,15 @@
     <ClCompile Include="MainDlg.cpp" />
     <ClCompile Include="Routines.cpp" />
     <ClCompile Include="DlgModules.cpp" />
+    <ClCompile Include="AppSettings.cpp" />
+    <ClCompile Include="EngineDetect.cpp" />
+    <ClCompile Include="ProcessCatalog.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Button.hpp" />
+    <ClInclude Include="AppSettings.h" />
+    <ClInclude Include="EngineDetect.h" />
+    <ClInclude Include="ProcessCatalog.h" />
     <ClInclude Include="ComboBox.hpp" />
     <ClInclude Include="DriverExtract.h" />
     <ClInclude Include="Log.h" />

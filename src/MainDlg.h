@@ -11,8 +11,13 @@
 #include "StatusBar.hpp"
 #include "Message.hpp"
 #include "InjectionCore.h"
+#include "EngineDetect.h"
+#include "AppSettings.h"
+#include "ProcessCatalog.h"
 
 #include "Log.h"
+
+#define WM_APP_REFRESH_PROCESSES (WM_APP + 1)
 
 class MainDlg : public Dialog
 {
@@ -34,6 +39,7 @@ public:
     /// <returns>Error code</returns>
     int LoadAndInject()
     {
+        AppSettings::Instance().Load();
         LoadConfig( _defConfig );
         Inject();
         return 0;
@@ -62,6 +68,49 @@ private:
     /// </summary>
     /// <returns>Error code</returns>
     DWORD FillProcessList();
+
+    /// <summary>
+    /// Rebuild combo contents from the cached process catalog, applying the
+    /// current picker mode and text filter.
+    /// </summary>
+    /// <param name="keepPid">PID to keep selected if it is still visible</param>
+    /// <param name="allowRestore">Allow restoring the remembered target</param>
+    void RebuildProcessList( DWORD keepPid, bool allowRestore );
+
+    /// <summary>
+    /// PID of the current combo selection (0 if none)
+    /// </summary>
+    DWORD SelectedPid() const;
+
+    /// <summary>
+    /// Find the visible combo index for a PID (-1 if not present)
+    /// </summary>
+    int IndexOfPid( DWORD pid ) const;
+
+    /// <summary>
+    /// Select a visible entry and make it the active target
+    /// </summary>
+    void SelectVisibleItem( int index, bool remember );
+
+    /// <summary>
+    /// Select the first entry matching the typed filter (Enter key)
+    /// </summary>
+    void CommitFilterSelection();
+
+    /// <summary>
+    /// Current existing-process picker mode (All/Games/Recent)
+    /// </summary>
+    PickerMode CurrentPickerMode() const;
+
+    /// <summary>
+    /// Switch the picker mode and update the radio buttons
+    /// </summary>
+    void SetPickerMode( PickerMode mode );
+
+    /// <summary>
+    /// Select the whole combo edit text (so typing replaces it)
+    /// </summary>
+    void SelectAllComboText();
 
     /// Set current process
     /// </summary>
@@ -110,6 +159,8 @@ private:
     // Message handlers
     //
     MSG_HANDLER( OnInit );
+    MSG_HANDLER( OnCommand );
+    MSG_HANDLER( OnDeferredInit );
     MSG_HANDLER( OnClose );
     MSG_HANDLER( OnLoadImage );
     MSG_HANDLER( OnRemoveImage );
@@ -121,6 +172,17 @@ private:
     MSG_HANDLER( OnSelChange );
     MSG_HANDLER( OnDragDrop );
     MSG_HANDLER( OnExistingProcess );
+    MSG_HANDLER( OnGamesProcess );
+    MSG_HANDLER( OnRecentProcess );
+
+    // Process picker helpers
+    MSG_HANDLER( OnFilterChange );
+    MSG_HANDLER( OnFilterFocus );
+    MSG_HANDLER( OnComboEditKey );
+    MSG_HANDLER( OnCommitFilter );
+    MSG_HANDLER( OnCancelFilter );
+    MSG_HANDLER( OnRefreshProcessList );
+    MSG_HANDLER( OnClearEngineCache );
 
     MSG_HANDLER( OnLoadProfile );
     MSG_HANDLER( OnSaveProfile );
@@ -138,15 +200,25 @@ private:
     vecImageExports _exports;       // Exports list
     std::mutex      _lock;          // Injection lock
 
+    std::vector<proc::Entry> _visible;  // Processes currently in the combo
+    proc::Catalog   _catalog;           // Process enumeration + fingerprint core
+    std::wstring    _filterText;        // Typed filter (independent of combo text)
+    std::wstring    _restoreName;       // Target to restore (profile/last target)
+    bool            _rebuilding = false;
+    bool            _suppressFilter = false;
+
     //
     // Interface controls
     //  
     ctrl::ComboBox _procList;       // Process list
+    ctrl::EditBox  _comboEdit;      // Edit portion of the process combo
     ctrl::ListView _modules;        // Image list
 
     ctrl::StatusBar _status;        // Status bar
 
     ctrl::Button _exProc;           // Existing process radio-button
+    ctrl::Button _gamesProc;        // Existing -> game engines only
+    ctrl::Button _recentProc;       // Existing -> recent targets
     ctrl::Button _newProc;          // New process radio-button
     ctrl::Button _autoProc;         // Manual launch radio-button
     ctrl::Button _selectProc;       // Select process path

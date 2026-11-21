@@ -1,0 +1,23 @@
+<Project>
+  <!--
+    Build compatibility shim for modern MSVC toolsets (v143+).
+    Upstream Xenos/BlackBone predates C++17 conformance defaults:
+      * const wchar_t*/const char* literals are passed to non-const APIs
+      * a few standard headers are included only transitively
+    The forced include is C-safe (guarded with __cplusplus).
+  -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <ConformanceMode>false</ConformanceMode>
+      <AdditionalOptions>/Zc:strictStrings- /FI"$(MSBuildThisFileDirectory)build\compat_force_include.h" /D_CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <!-- Optional local shim for build agents without the ATL component -->
+      <!-- Optional local shim for build agents without the ATL component -->
+      <AdditionalLibraryDirectories Condition="'$(Platform)'=='x64' And Exists('$(MSBuildThisFileDirectory)build\atl-shim\x64\atls.lib')">$(MSBuildThisFileDirectory)build\atl-shim\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories Condition="'$(Platform)'=='Win32' And Exists('$(MSBuildThisFileDirectory)build\atl-shim\x86\atls.lib')">$(MSBuildThisFileDirectory)build\atl-shim\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

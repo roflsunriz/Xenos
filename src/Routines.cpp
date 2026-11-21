@@ -23,12 +23,17 @@ DWORD MainDlg::LoadConfig( const std::wstring& path /*= L""*/ )
             }
             else
             {
+                _restoreName = blackbone::Utils::StripPath( cfg.procName );
+
                 std::vector<DWORD> pidList = blackbone::Process::EnumByName( cfg.procName );
+                if (pidList.empty() && _restoreName != cfg.procName)
+                    pidList = blackbone::Process::EnumByName( _restoreName );
+
                 if (!pidList.empty())
                 {
                     cfg.pid = pidList.front();
 
-                    auto idx = _procList.Add( cfg.procName + L" (" + std::to_wstring( pidList.front() ) + L")", pidList.front() );
+                    auto idx = _procList.Add( _restoreName + L" (" + std::to_wstring( pidList.front() ) + L")", pidList.front() );
                     _procList.selection( idx );
 
                     SetActiveProcess( pidList.front(), cfg.procName );
@@ -38,13 +43,23 @@ DWORD MainDlg::LoadConfig( const std::wstring& path /*= L""*/ )
 
         // Process mode
         _exProc.checked( false );
+        _gamesProc.checked( false );
+        _recentProc.checked( false );
         _newProc.checked( false );
         _autoProc.checked( false );
         switch (cfg.processMode)
         {
             case Existing:
-                _exProc.checked( true );
+            {
+                // Existing has three sub-modes; restore the last used one
+                switch (AppSettings::Instance().pickerMode)
+                {
+                    case PickerMode::Games:  _gamesProc.checked( true );  break;
+                    case PickerMode::Recent: _recentProc.checked( true ); break;
+                    default:                 _exProc.checked( true );     break;
+                }
                 break;
+            }
             case NewProcess:
                 _newProc.checked( true );
                 break;
@@ -71,7 +86,12 @@ DWORD MainDlg::LoadConfig( const std::wstring& path /*= L""*/ )
     // Default settings
     else
     {
-        _exProc.checked( true );
+        switch (AppSettings::Instance().pickerMode)
+        {
+            case PickerMode::Games:  _gamesProc.checked( true );  break;
+            case PickerMode::Recent: _recentProc.checked( true ); break;
+            default:                 _exProc.checked( true );     break;
+        }
     }
 
     UpdateInterface();
@@ -87,35 +107,124 @@ DWORD MainDlg::SaveConfig( const std::wstring& path /*= L""*/ )
 {
     auto& cfg = _profileMgr.config();
 
-    cfg.procName = _processPath;
+    // "Existing" targets are remembered by image name; launch modes keep the
+    // full path because they have to start the process themselves.
+    cfg.procName = _newProc.checked() || _autoProc.checked() ? _processPath : blackbone::Utils::StripPath( _processPath );
     cfg.images.clear();
     for (auto& img : _images)
         cfg.images.emplace_back( img->path() );
 
-    cfg.processMode = (_exProc ? Existing : (_newProc ? NewProcess : ManualLaunch));
+    cfg.processMode = _newProc.checked() ? NewProcess : (_autoProc.checked() ? ManualLaunch : Existing);
 
     _profileMgr.Save( path );
     return ERROR_SUCCESS;
 }
 
 /// <summary>
-/// Enumerate processes
+/// Enumerate processes and refresh the picker
 /// </summary>
 /// <returns>Error code</returns>
 DWORD MainDlg::FillProcessList()
 {
-    _procList.reset();
+    const DWORD previousPid = SelectedPid();
 
-    auto found = blackbone::Process::EnumByNameOrPID( 0, L"" ).result( std::vector<blackbone::ProcessInfo>() );
-    for (auto& proc : found)
-    {
-        wchar_t text[255] = { 0 };
-        swprintf_s( text, L"%ls (%d)", proc.imageName.c_str(), proc.pid );
-
-        _procList.Add( text, proc.pid );
-    }
+    _catalog.Refresh();
+    RebuildProcessList( previousPid, true );
 
     return ERROR_SUCCESS;
+}
+
+/// <summary>
+/// Rebuild combo contents from the cached process catalog
+/// </summary>
+void MainDlg::RebuildProcessList( DWORD keepPid, bool allowRestore )
+{
+    if (_rebuilding)
+        return;
+
+    // Launch modes keep the explicitly selected executable in the combo
+    if (_newProc.checked() || _autoProc.checked())
+    {
+        UpdateInterface();
+        return;
+    }
+
+    _rebuilding = true;
+    _suppressFilter = true;
+
+    const auto& settings = AppSettings::Instance();
+    const std::wstring savedText = _procList.selectedText();
+
+    proc::QueryOptions options;
+    options.mode = CurrentPickerMode();
+    options.filter = _filterText;
+
+    _visible = _catalog.Query( options );
+
+    _procList.reset();
+    for (auto& entry : _visible)
+        _procList.Add( proc::Catalog::DisplayText( entry ), static_cast<int>( entry.pid ) );
+
+    // Keep the current selection when possible
+    int index = keepPid != 0 ? proc::Catalog::FindPid( _visible, keepPid ) : -1;
+
+    // Restore a target loaded from a profile (by image name)
+    if (index < 0 && allowRestore && !_restoreName.empty())
+    {
+        for (size_t i = 0; i < _visible.size(); i++)
+        {
+            if (_wcsicmp( _visible[i].name.c_str(), _restoreName.c_str() ) == 0)
+            {
+                index = static_cast<int>( i );
+                break;
+            }
+        }
+    }
+
+    // Restore the most recent running target
+    if (index < 0 && allowRestore && _restoreName.empty() && settings.autoSelectRecent)
+        index = proc::Catalog::FindRecent( _visible, settings );
+
+    if (index >= 0)
+    {
+        ComboBox_SetCurSel( _procList.hwnd(), index );
+
+        const auto& selected = _visible[index];
+        _processPath = selected.path.empty() ? selected.name : selected.path;
+    }
+    else
+    {
+        ComboBox_SetCurSel( _procList.hwnd(), -1 );
+    }
+
+    // Restore the edit text (typing filter or previously displayed selection)
+    std::wstring hint;
+    if (!_filterText.empty())
+    {
+        _procList.selectedText( _filterText );
+    }
+    else if (index < 0)
+    {
+        _procList.selectedText( savedText );
+
+        if (_visible.empty())
+        {
+            if (!_restoreName.empty())
+                hint = _restoreName;
+            else if (options.mode == PickerMode::Recent)
+                hint = L"recent target not running";
+            else if (options.mode == PickerMode::Games)
+                hint = L"no game processes (switch Type or press F5)";
+        }
+    }
+
+    if (!hint.empty())
+        _procList.selectedText( hint );
+
+    _rebuilding = false;
+    _suppressFilter = false;
+
+    UpdateInterface();
 }
 
 /// <summary>
@@ -130,9 +239,14 @@ DWORD MainDlg::SetActiveProcess( DWORD pid, const std::wstring& path )
     if (pid == 0)
     {
         // Update process list
+        _filterText.clear();
         _procList.reset();
-        _procList.Add( blackbone::Utils::StripPath( path ), 0 );
-        _procList.selection( 0 );
+
+        if (!path.empty())
+        {
+            _procList.Add( blackbone::Utils::StripPath( path ), 0 );
+            _procList.selection( 0 );
+        }
     }
 
     return ERROR_SUCCESS;
@@ -152,7 +266,7 @@ void MainDlg::Inject()
     // Fill in context
     context.cfg = cfg;
     context.images = _images;
-    context.pid = _procList.itemData( _procList.selection() );
+    context.pid = _procList.selection() >= 0 ? _procList.itemData( _procList.selection() ) : cfg.pid;
     context.procPath = _processPath;
     context.skippedCount = 0;
     context.procList.clear();
@@ -190,8 +304,10 @@ void MainDlg::Inject()
 /// <returns>Error code</returns>
 DWORD MainDlg::UpdateInterface( )
 {
+    const bool attachMode = !_newProc.checked() && !_autoProc.checked();
+
     // Reset controls state
-    if (_exProc.checked())
+    if (attachMode)
     {
         _procList.enable();
         _selectProc.disable();
@@ -205,6 +321,8 @@ DWORD MainDlg::UpdateInterface( )
     if (_profileMgr.config().injectMode == Kernel_DriverMap)
     {
         _exProc.disable();
+        _gamesProc.disable();
+        _recentProc.disable();
         _newProc.disable();
         _autoProc.disable();
         _procList.disable();
@@ -213,12 +331,15 @@ DWORD MainDlg::UpdateInterface( )
     else
     {
         _exProc.enable();
+        _gamesProc.enable();
+        _recentProc.enable();
         _newProc.enable();
         _autoProc.enable();
     }
 
     // Disable inject button if no images available or no process selected
-    if (_images.empty() || _procList.selection() == -1)
+    const bool hasTarget = attachMode ? SelectedPid() != 0 : !_processPath.empty();
+    if (_images.empty() || _procList.selection() == -1 || !hasTarget)
         _inject.disable();
     else
         _inject.enable();
