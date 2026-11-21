@@ -185,12 +185,35 @@ Safety checks before ejecting:
 - PID **and** process creation time must match (PID reuse is detected).
 - The module base must still contain a PE image with the recorded size.
 - The loader name must match before `FreeLibrary`.
+- Threads started by the module (and target threads currently executing inside
+  it) are detected. Freeing an image under a running thread is the usual cause
+  of an `0xC0000005` execute fault in the unloaded module
+  (`FSD-Win64-Shipping` is one such target).
 - Stale handles are marked `stale`; `--force` bypasses the identity checks.
 
 Normal modules are unloaded with `FreeLibrary` inside the target.
 Manually mapped modules get `DllMain(DLL_PROCESS_DETACH)` and are then released
-with `VirtualFreeEx` (best-effort: code still executing in the DLL can crash
-the target, just like any unload).
+with `VirtualFreeEx`.
+
+#### Cooperative unload (`XenosUnload`) ####
+
+Calling `DllMain(DLL_PROCESS_DETACH)` from outside the loader is not safe while
+the DLL still has worker threads: the CRT is torn down under them. DLLs that
+start threads should export a no-argument routine named `XenosUnload`:
+
+```cpp
+extern "C" __declspec(dllexport) void XenosUnload()
+{
+    g_stop = true;                       // signal worker threads
+    WaitForSingleObject(g_worker, 5000); // and wait for them to exit
+    CloseHandle(g_worker);
+}
+```
+
+Before ejecting, Xenos calls this export, waits for the module's threads to
+exit, and only then unloads it. If a DLL has live threads but no `XenosUnload`
+export, eject reports `Busy` and leaves the image mapped instead of crashing
+the target. `--force` skips the check and performs a plain unload.
 
 Re-inject first ejects the old handle and any other tracked instance of the
 same image in that process, then injects with the original method/options.

@@ -125,6 +125,334 @@ namespace
         return start != 0 && start == record.processStart;
     }
 
+    // ThreadQuerySetWin32StartAddress. winternl.h does not expose the enum name
+    // on every SDK, but the information class value is stable.
+    const ULONG ThreadQuerySetWin32StartAddressClass = 9;
+
+    bool QueryThreadStartAddress( HANDLE thread, uintptr_t& address )
+    {
+        address = 0;
+        if (!thread)
+            return false;
+
+        using fnNtQueryInformationThread =
+            NTSTATUS (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+        static fnNtQueryInformationThread query =
+            reinterpret_cast<fnNtQueryInformationThread>(
+                GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtQueryInformationThread" ));
+
+        if (!query)
+            return false;
+
+        ULONG returned = 0;
+        const NTSTATUS status = query(
+            thread,
+            ThreadQuerySetWin32StartAddressClass,
+            &address, sizeof( address ), &returned );
+
+        if (!NT_SUCCESS( status ) || returned < sizeof( address ))
+            address = 0;
+
+        return address != 0;
+    }
+
+    uintptr_t ThreadInstructionPointer( blackbone::Thread& thread, bool wow64 )
+    {
+#ifdef USE32
+        (void)wow64;
+        blackbone::_CONTEXT32 ctx = { 0 };
+        if (NT_SUCCESS( thread.GetContext( ctx, CONTEXT_CONTROL ) ))
+            return ctx.Eip;
+#else
+        if (wow64)
+        {
+            blackbone::_CONTEXT32 ctx = { 0 };
+            if (NT_SUCCESS( thread.GetContext( ctx, WOW64_CONTEXT_CONTROL ) ))
+                return ctx.Eip;
+        }
+        else
+        {
+            blackbone::_CONTEXT64 ctx = { 0 };
+            if (NT_SUCCESS( thread.GetContext( ctx, CONTEXT_CONTROL ) ))
+                return ctx.Rip;
+        }
+#endif
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Threads that belong to a module: threads created by the DLL itself
+    /// (their Win32 start address is inside the image) and, separately,
+    /// foreign threads that are currently executing code in the image.
+    /// Unloading while either exists is what crashes the target.
+    /// </summary>
+    struct ModuleThreadScan
+    {
+        std::vector<blackbone::ThreadPtr> owned;
+        bool executingOther = false;
+    };
+
+    ModuleThreadScan ScanModuleThreads(
+        blackbone::Process& process, uint64_t baseAddress, uint32_t imageSize )
+    {
+        ModuleThreadScan scan;
+
+        if (baseAddress == 0 || imageSize == 0 || !process.core().handle())
+            return scan;
+
+        const uint64_t end = baseAddress + imageSize;
+        const bool wow64 = process.core().isWow64();
+
+        for (auto& thread : process.threads().getAll())
+        {
+            if (!thread || !thread->handle())
+                continue;
+
+            uintptr_t start = 0;
+            if (QueryThreadStartAddress( thread->handle(), start ) &&
+                start >= baseAddress && start < end)
+            {
+                scan.owned.emplace_back( thread );
+                continue;
+            }
+
+            const uintptr_t ip = ThreadInstructionPointer( *thread, wow64 );
+            if (ip >= baseAddress && ip < end)
+                scan.executingOther = true;
+        }
+
+        return scan;
+    }
+
+    uint32_t ResolveImageSize(
+        blackbone::Process& process, uint64_t baseAddress, uint32_t expectedSize )
+    {
+        uint32_t imageSize = expectedSize;
+
+        if (imageSize == 0)
+            ReadMappedImageSize( process, baseAddress, imageSize );
+
+        if (imageSize == 0)
+        {
+            MEMORY_BASIC_INFORMATION mbi = { 0 };
+            if (VirtualQueryEx(
+                    process.core().handle(), reinterpret_cast<LPCVOID>( baseAddress ),
+                    &mbi, sizeof( mbi ) ) != 0)
+            {
+                imageSize = static_cast<uint32_t>( mbi.RegionSize );
+            }
+        }
+
+        return imageSize;
+    }
+
+    bool CallModuleEntryPoint(
+        blackbone::Process& process, uint64_t baseAddress,
+        const std::wstring& imagePath, void* reserved, std::wstring& message )
+    {
+        uint32_t entryRva = 0;
+        uint64_t entry = 0;
+
+        if (ReadMappedEntry( process, baseAddress, entryRva ) && entryRva != 0)
+            entry = baseAddress + entryRva;
+        else if (!imagePath.empty())
+        {
+            blackbone::pe::PEImage image;
+            if (NT_SUCCESS( image.Load( imagePath ) ))
+                entry = image.entryPoint( static_cast<blackbone::module_t>( baseAddress ) );
+        }
+
+        if (entry == 0)
+        {
+            message = L"can not locate the module entry point";
+            return false;
+        }
+
+        using fnDllMain = int( __stdcall* )(void*, unsigned long, void*);
+
+        blackbone::RemoteFunction<fnDllMain> dllMain(
+            process, static_cast<blackbone::ptr_t>( entry ) );
+
+        auto result = dllMain.Call(
+            reinterpret_cast<void*>( baseAddress ),
+            static_cast<unsigned long>( 0 /*DLL_PROCESS_DETACH*/ ),
+            reserved );
+
+        if (!NT_SUCCESS( result.status ))
+        {
+            message = L"DllMain(DLL_PROCESS_DETACH) call failed: " +
+                blackbone::Utils::GetErrorDescription( result.status );
+            return false;
+        }
+
+        if (result.result( 0 ) == 0)
+            message = L"warning: DllMain(DLL_PROCESS_DETACH) returned FALSE; ";
+
+        return true;
+    }
+
+    uint64_t FindModuleExport(
+        blackbone::Process& process, uint64_t baseAddress,
+        const std::wstring& imagePath, const blackbone::ModuleDataPtr& module,
+        const char* name )
+    {
+        if (module)
+        {
+            auto exp = process.modules().GetExport( module, name );
+            if (exp)
+                return exp->procAddress;
+        }
+
+        if (!imagePath.empty())
+        {
+            blackbone::pe::PEImage image;
+            if (NT_SUCCESS( image.Load( imagePath ) ))
+            {
+                blackbone::pe::vecExports exports;
+                image.GetExports( exports );
+
+                uint64_t address = 0;
+                for (auto& exp : exports)
+                {
+                    if (exp.name == name)
+                    {
+                        address = baseAddress + exp.RVA;
+                        break;
+                    }
+                }
+
+                image.Release( true );
+                return address;
+            }
+        }
+
+        return 0;
+    }
+
+    bool CallStopExport(
+        blackbone::Process& process, uint64_t address, std::wstring& message )
+    {
+        using fnStop = int( __cdecl* )();
+
+        blackbone::RemoteFunction<fnStop> fn(
+            process, static_cast<blackbone::ptr_t>( address ) );
+
+        auto result = fn.Call();
+        if (!NT_SUCCESS( result.status ))
+        {
+            message = blackbone::Utils::GetErrorDescription( result.status );
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Make sure no code from the module can still be executing before its
+    /// image is released.
+    ///
+    /// DLLs that create their own threads are the common crash case: the
+    /// loader's FreeLibrary immediately unmaps the image after DllMain returns,
+    /// so a worker thread that has not noticed DLL_PROCESS_DETACH yet faults on
+    /// the next instruction it fetches from the DLL (see the FSD-Win64-Shipping
+    /// minidumps: execute AV in an unloaded module after the eject).
+    ///
+    /// A DLL cannot be signalled safely from outside: calling its entry point
+    /// as DllMain(DLL_PROCESS_DETACH) runs the CRT shutdown code while its own
+    /// worker threads are still using the CRT, which deadlocks or corrupts the
+    /// heap. Instead, cooperating payloads export XenosUnload(), which is
+    /// expected to signal their threads and wait for them to exit. If that
+    /// export is missing, refuse to unload instead of crashing the target.
+    /// </summary>
+    EjectStatus QuiesceModule(
+        blackbone::Process& process, uint64_t baseAddress, uint32_t imageSize,
+        const std::wstring& imagePath, const blackbone::ModuleDataPtr& module,
+        bool force, std::wstring& message )
+    {
+        if (force)
+            return EjectStatus::Ok;
+
+        imageSize = ResolveImageSize( process, baseAddress, imageSize );
+
+        const DWORD started = GetTickCount();
+        const DWORD timeout = 5000;
+        bool stopRequested = false;
+
+        for (;;)
+        {
+            ModuleThreadScan scan = ScanModuleThreads( process, baseAddress, imageSize );
+
+            if (scan.owned.empty() && !scan.executingOther)
+                return EjectStatus::Ok;
+
+            if (!scan.owned.empty() && !stopRequested)
+            {
+                const uint64_t stop = FindModuleExport(
+                    process, baseAddress, imagePath, module, "XenosUnload" );
+
+                if (stop == 0)
+                {
+                    message = L"the module has its own running thread(s). "
+                              L"Export XenosUnload so they can be stopped before unloading, "
+                              L"or use --force to unload anyway (may crash the target)";
+                    return EjectStatus::Busy;
+                }
+
+                std::wstring callError;
+                if (!CallStopExport( process, stop, callError ))
+                {
+                    message = L"module XenosUnload failed: " + callError;
+                    return EjectStatus::Busy;
+                }
+
+                stopRequested = true;
+                continue;
+            }
+
+            if (GetTickCount() - started >= timeout)
+            {
+                message = stopRequested
+                    ? L"XenosUnload was called but the module still has running thread(s); "
+                      L"not unloading it to avoid a crash"
+                    : L"a target thread is still executing module code; "
+                      L"not unloading it to avoid a crash";
+                return EjectStatus::Busy;
+            }
+
+            Sleep( 25 );
+        }
+    }
+
+    EjectStatus WaitForModuleIdle(
+        blackbone::Process& process, uint64_t baseAddress, uint32_t imageSize,
+        bool force, std::wstring& message )
+    {
+        if (force)
+            return EjectStatus::Ok;
+
+        imageSize = ResolveImageSize( process, baseAddress, imageSize );
+
+        const DWORD started = GetTickCount();
+
+        for (;;)
+        {
+            ModuleThreadScan scan = ScanModuleThreads( process, baseAddress, imageSize );
+            if (scan.owned.empty() && !scan.executingOther)
+                return EjectStatus::Ok;
+
+            if (GetTickCount() - started >= 5000)
+            {
+                message = L"the module still has running thread(s) or code; "
+                          L"not releasing its image to avoid a crash";
+                return EjectStatus::Busy;
+            }
+
+            Sleep( 25 );
+        }
+    }
+
     bool LoadImageForReinject( const std::wstring& path, std::shared_ptr<blackbone::pe::PEImage>& image )
     {
         image = std::make_shared<blackbone::pe::PEImage>();
@@ -157,6 +485,7 @@ const wchar_t* EjectStatusText( EjectStatus status )
         case EjectStatus::StaleProcess:  return L"target process is gone or was reused";
         case EjectStatus::ModuleMismatch:return L"module identity mismatch";
         case EjectStatus::Unsupported:   return L"eject is not supported for this injection";
+        case EjectStatus::Busy:          return L"module is still running code";
         case EjectStatus::Failed:        return L"eject failed";
     }
 
@@ -555,6 +884,18 @@ EjectStatus UnloadModuleAt( blackbone::Process& process, uint64_t baseAddress,
 
         if (module)
         {
+            // Never free an image that still has its own threads running.
+            // QuiesceModule asks a cooperating payload (XenosUnload) to stop
+            // them, waits for them to exit, and reports Busy instead of
+            // unmapping the image under them (which is the crash we see in
+            // FSD-Win64-Shipping.exe).
+            const uint32_t imageSize = expectedSize != 0 ? expectedSize : module->size;
+            const EjectStatus quiesce = QuiesceModule(
+                process, baseAddress, imageSize, imagePath, module, force, message );
+
+            if (quiesce != EjectStatus::Ok)
+                return quiesce;
+
             bool unloaded = false;
 
             // FreeLibrary performs proper loader refcount bookkeeping.
@@ -597,40 +938,58 @@ EjectStatus UnloadModuleAt( blackbone::Process& process, uint64_t baseAddress,
     {
         // Manually mapped image: call DllMain(DLL_PROCESS_DETACH) and free the
         // private image. This is best-effort and inherently risky.
-        uint32_t entryRva = 0;
-        uint64_t entry = 0;
+        const uint32_t imageSize = ResolveImageSize( process, baseAddress, expectedSize );
 
-        if (ReadMappedEntry( process, baseAddress, entryRva ) && entryRva != 0)
-            entry = baseAddress + entryRva;
-        else if (!imagePath.empty())
+        if (!force)
         {
-            blackbone::pe::PEImage image;
-            if (NT_SUCCESS( image.Load( imagePath ) ))
-                entry = image.entryPoint( static_cast<blackbone::module_t>( baseAddress ) );
-        }
+            ModuleThreadScan scan = ScanModuleThreads( process, baseAddress, imageSize );
 
-        if (entry != 0)
-        {
-            using fnDllMain = int( __stdcall* )(void*, unsigned long, void*);
-
-            blackbone::RemoteFunction<fnDllMain> dllMain(
-                process, static_cast<blackbone::ptr_t>( entry ) );
-
-            auto result = dllMain.Call(
-                reinterpret_cast<void*>( baseAddress ),
-                static_cast<unsigned long>( 0 /*DLL_PROCESS_DETACH*/ ),
-                static_cast<void*>( nullptr ) );
-
-            if (!NT_SUCCESS( result.status ))
+            if (!scan.owned.empty())
             {
-                message = L"DllMain(DLL_PROCESS_DETACH) call failed: " +
-                    blackbone::Utils::GetErrorDescription( result.status );
-                return EjectStatus::Failed;
+                const uint64_t stop = FindModuleExport(
+                    process, baseAddress, imagePath, nullptr, "XenosUnload" );
+
+                if (stop == 0)
+                {
+                    message = L"the module has its own running thread(s). "
+                              L"Export XenosUnload so they can be stopped before unloading, "
+                              L"or use --force to unload anyway (may crash the target)";
+                    return EjectStatus::Busy;
+                }
+
+                std::wstring callError;
+                if (!CallStopExport( process, stop, callError ))
+                {
+                    message = L"module XenosUnload failed: " + callError;
+                    return EjectStatus::Busy;
+                }
             }
 
-            if (result.result( 0 ) == 0)
-                message = L"warning: DllMain(DLL_PROCESS_DETACH) returned FALSE; ";
+            // Wait for module-owned threads and foreign callbacks to leave the
+            // image before DllMain(DLL_PROCESS_DETACH) and VirtualFreeEx.
+            const EjectStatus idle = WaitForModuleIdle(
+                process, baseAddress, imageSize, false, message );
+
+            if (idle != EjectStatus::Ok)
+                return idle;
         }
+
+        std::wstring callMessage;
+        if (!CallModuleEntryPoint(
+                process, baseAddress, imagePath, nullptr, callMessage ))
+        {
+            message = callMessage;
+            return EjectStatus::Failed;
+        }
+
+        if (!callMessage.empty())
+            message = callMessage;
+
+        const EjectStatus idle = WaitForModuleIdle(
+            process, baseAddress, imageSize, force, message );
+
+        if (idle != EjectStatus::Ok)
+            return idle;
 
         if (!VirtualFreeEx(
             process.core().handle(),

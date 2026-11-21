@@ -71,6 +71,7 @@ enum class EjectStatus
     StaleProcess,
     ModuleMismatch,
     Unsupported,
+    Busy,       // DLL still has live threads/code; unloading would crash the target
     Failed,
 };
 
@@ -120,6 +121,12 @@ bool IsInjectionLive( const InjectionRecord& record );
 /// Safely unload a module at a known base address.
 /// Normal modules use FreeLibrary in the target; manual modules call
 /// DllMain(DLL_PROCESS_DETACH) and release the mapped image.
+/// Before freeing the image the target is checked for threads that were
+/// started by the module (or are executing inside it). Freeing a DLL while
+/// its code is still running is what makes the target crash. A payload can
+/// export XenosUnload() to stop its threads; when that export is missing and
+/// the module still has live threads, the eject is refused (Busy) instead of
+/// unmapping the image. Pass force = true to bypass the check.
 /// </summary>
 EjectStatus UnloadModuleAt(
     blackbone::Process& process,
