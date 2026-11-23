@@ -216,6 +216,8 @@
     <ClCompile Include="EngineDetect.cpp" />
     <ClCompile Include="InjectionRegistry.cpp" />
     <ClCompile Include="ProcessCatalog.cpp" />
+    <ClCompile Include="WatchInjector.cpp" />
+    <ClCompile Include="PeHardener.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Button.hpp" />
@@ -224,6 +226,8 @@
     <ClInclude Include="EngineDetect.h" />
     <ClInclude Include="InjectionRegistry.h" />
     <ClInclude Include="ProcessCatalog.h" />
+    <ClInclude Include="WatchInjector.h" />
+    <ClInclude Include="PeHardener.h" />
     <ClInclude Include="ComboBox.hpp" />
     <ClInclude Include="DriverExtract.h" />
     <ClInclude Include="Log.h" />

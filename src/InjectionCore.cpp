@@ -1,5 +1,6 @@
 #include "InjectionCore.h"
 #include "InjectionRegistry.h"
+#include "WatchInjector.h"
 #include <BlackBone/src/BlackBone/Process/RPC/RemoteFunction.hpp>
 #include <iterator>
 
@@ -97,6 +98,34 @@ NTSTATUS InjectionCore::GetTargetProcess( InjectContext& context, PROCESS_INFORM
                     std::inserter( context.procDiff, context.procDiff.begin() ) 
                     );
             }
+        }
+
+        // AmalgamLoader-style readiness wait: a freshly created process is
+        // visible in the process list before it has finished loading its
+        // modules. Injecting immediately races engine/CRT initialization.
+        // Wait for two consecutive module snapshots (at most 5 seconds), then
+        // continue even if the process never reports a module list; native
+        // targets legitimately have very few modules.
+        watch::Readiness readiness;
+        readiness.stableChecks = 2;
+        readiness.intervalMs = 250;
+
+        std::wstring readinessReason;
+        const ULONGLONG readinessStart = GetTickCount64();
+        while (context.waitActive &&
+               GetTickCount64() - readinessStart < 5000 &&
+               !watch::IsProcessReady( context.pid, readiness, readinessReason ))
+        {
+            Sleep( 250 );
+        }
+
+        if (!readinessReason.empty())
+            xlog::Verbose( "Process %d readiness wait ended: %ls", context.pid, readinessReason.c_str() );
+
+        if (!context.waitActive)
+        {
+            xlog::Warning( "Process wait canceled during readiness check" );
+            return STATUS_REQUEST_ABORTED;
         }
     }
     // Create new process

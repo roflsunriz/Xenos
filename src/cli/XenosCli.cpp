@@ -12,6 +12,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <memory>
@@ -26,6 +27,8 @@
 #include "../Message.hpp"
 #include "../ProcessCatalog.h"
 #include "../DriverExtract.h"
+#include "../WatchInjector.h"
+#include "../PeHardener.h"
 
 namespace
 {
@@ -33,6 +36,21 @@ namespace
     HANDLE g_stderr = INVALID_HANDLE_VALUE;
     bool   g_consoleOut = false;
     bool   g_consoleErr = false;
+
+    std::atomic<watch::Watcher*> g_activeWatcher{ nullptr };
+
+    BOOL WINAPI WatchCtrlHandler( DWORD type )
+    {
+        if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT)
+        {
+            if (auto* watcher = g_activeWatcher.load())
+                watcher->Stop();
+
+            return TRUE;
+        }
+
+        return FALSE;
+    }
 
     void InitOutput()
     {
@@ -175,6 +193,29 @@ namespace
         int timeoutSec = 30;
         bool dryRun = false;
         bool force = false;
+
+        // watch / AmalgamLoader-style auto-injection
+        bool watch = false;
+        bool watchOnce = false;
+        bool watchExisting = true;
+        bool watchExitWhenGone = false;
+        std::wstring watchExe;
+        std::vector<std::wstring> readyModules;
+        uint32_t minModules = 0;
+        uint32_t stableChecks = 2;
+        uint32_t settleMs = 0;
+        uint32_t watchInterval = 500;
+        uint32_t watchPoll = 1000;
+        uint32_t watchTimeoutSec = 0;
+        uint32_t retryCount = 3;
+        uint32_t retryDelay = 500;
+        uint32_t retryJitter = 100;
+
+        // PE fingerprint randomization (AmalgamLoader-style, safe subset)
+        bool hardenTimestamp = true;
+        uint32_t hardenOverlay = 1024;
+        bool hardenInPlace = false;
+        std::wstring hardenOutput;
     };
 
     bool ParseMode( const std::wstring& value, PickerMode& mode )
@@ -364,6 +405,90 @@ namespace
             {
                 options.force = true;
             }
+            else if (arg == L"--watch")
+            {
+                options.watch = true;
+            }
+            else if (arg == L"--once")
+            {
+                options.watchOnce = true;
+            }
+            else if (arg == L"--watch-existing")
+            {
+                options.watchExisting = true;
+            }
+            else if (arg == L"--no-watch-existing")
+            {
+                options.watchExisting = false;
+            }
+            else if (arg == L"--exit-when-gone" || arg == L"--watch-exit")
+            {
+                options.watchExitWhenGone = true;
+            }
+            else if (arg == L"--exe" && i + 1 < argc)
+            {
+                options.watchExe = argv[++i];
+            }
+            else if (arg == L"--module" && i + 1 < argc)
+            {
+                options.readyModules.emplace_back( argv[++i] );
+            }
+            else if (arg == L"--min-modules" && i + 1 < argc)
+            {
+                options.minModules = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--stable-checks" && i + 1 < argc)
+            {
+                options.stableChecks = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--settle" && i + 1 < argc)
+            {
+                options.settleMs = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--watch-interval" && i + 1 < argc)
+            {
+                options.watchInterval = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--watch-poll" && i + 1 < argc)
+            {
+                options.watchPoll = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--watch-timeout" && i + 1 < argc)
+            {
+                options.watchTimeoutSec = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--retry" && i + 1 < argc)
+            {
+                options.retryCount = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--retry-delay" && i + 1 < argc)
+            {
+                options.retryDelay = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--jitter" && i + 1 < argc)
+            {
+                options.retryJitter = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--timestamp")
+            {
+                options.hardenTimestamp = true;
+            }
+            else if (arg == L"--no-timestamp")
+            {
+                options.hardenTimestamp = false;
+            }
+            else if (arg == L"--overlay" && i + 1 < argc)
+            {
+                options.hardenOverlay = static_cast<uint32_t>( wcstoul( argv[++i], nullptr, 0 ) );
+            }
+            else if (arg == L"--in-place")
+            {
+                options.hardenInPlace = true;
+            }
+            else if (arg == L"--output" && i + 1 < argc)
+            {
+                options.hardenOutput = argv[++i];
+            }
             else if (arg == L"--help" || arg == L"-h" || arg == L"/?")
             {
                 options.positional.emplace_back( L"--help" );
@@ -398,6 +523,38 @@ namespace
             L"  XenosCli injections [--pid N] [--json]\n"
             L"  XenosCli eject <handle> [--force] [--json]\n"
             L"  XenosCli reinject <handle> [--json]\n"
+            L"\n"
+            L"Watch (AmalgamLoader-style auto-injection):\n"
+            L"  XenosCli watch --dll <path> --exe <exe> [options]\n"
+            L"  XenosCli watch --dll <path> --name <image.exe> [options]\n"
+            L"\n"
+            L"  Readiness:\n"
+            L"    --module <name>          require a loaded module (repeatable)\n"
+            L"    --min-modules <n>        minimum number of loaded modules\n"
+            L"    --stable-checks <n>      consecutive ready checks (default 2)\n"
+            L"    --watch-interval <ms>    readiness poll interval (default 500)\n"
+            L"    --settle <ms>            extra wait after the process is ready\n"
+            L"    --watch-existing         inject instances that are already running (default)\n"
+            L"    --no-watch-existing      only inject instances started after the watcher\n"
+            L"    --watch-timeout <sec>    give up after N seconds (default: forever)\n"
+            L"    --once                   stop after the first successful injection\n"
+            L"    --exit-when-gone         stop when no target instance is running\n"
+            L"\n"
+            L"  Retry:\n"
+            L"    --retry <n>              injection attempts (default 3)\n"
+            L"    --retry-delay <ms>       first retry delay, doubled per attempt (default 500)\n"
+            L"    --jitter <ms>            random retry jitter (default 100)\n"
+            L"\n"
+            L"  --watch may also be added to `inject`.\n"
+            L"\n"
+            L"PE fingerprint (AmalgamLoader-style, safe subset):\n"
+            L"  XenosCli harden <file> [--timestamp|--no-timestamp] [--overlay N]\n"
+            L"                         [--output <path>] [--in-place] [--force] [--json]\n"
+            L"\n"
+            L"  --timestamp randomizes the PE TimeDateStamp (default: on)\n"
+            L"  --overlay N appends N random overlay bytes (default: 1024, 0 = off)\n"
+            L"  --in-place replaces the input file (refuses to touch the running exe)\n"
+            L"  --output writes to an explicit path (default: <name>.hardened<ext>)\n"
             L"\n"
             L"Injection:\n"
             L"  XenosCli inject --dll <path> [--dll <path> ...] [target] [options]\n"
@@ -436,7 +593,10 @@ namespace
             L"  XenosCli list --filter \"@unity mono\"\n"
             L"  XenosCli inject --dll payload.dll --mode games --filter mygame --manual\n"
             L"  XenosCli inject --dll payload.dll --pid 1234 --method normal\n"
-            L"  XenosCli inject --dll payload.dll --new \"C:\\Games\\MyGame\\MyGame.exe\" --timeout 60\n" );
+            L"  XenosCli inject --dll payload.dll --new \"C:\\Games\\MyGame\\MyGame.exe\" --timeout 60\n"
+            L"  XenosCli watch --dll payload.dll --name MyGame.exe --module engine.dll --min-modules 16 --settle 3000\n"
+            L"  XenosCli watch --dll payload.dll --exe \"C:\\Games\\MyGame\\MyGame.exe\" --once --json\n"
+            L"  XenosCli harden payload.dll --output payload.hardened.dll\n" );
     }
 
     void PrintEntry( const proc::Entry& entry )
@@ -1024,6 +1184,85 @@ namespace
         return elevated;
     }
 
+    bool NeedsDriver( const Options& options )
+    {
+        return options.method >= Kernel_Thread || options.krnHandle ||
+            (options.mmapFlags & blackbone::HideVAD) != 0;
+    }
+
+    bool PrepareDriver( const Options& options, bool exitOnFailure )
+    {
+        const bool needsDriver = NeedsDriver( options );
+
+        if (!IsElevated() && !needsDriver)
+            Err( L"note: not running elevated; elevated/protected targets will fail\n" );
+
+        if (!needsDriver)
+            return true;
+
+        if (!IsElevated())
+        {
+            Err( L"kernel injection / --krn-handle / --hide-vad requires administrator rights; run from an elevated prompt\n" );
+            return false;
+        }
+
+        DriverExtract::Instance().Extract();
+
+        NTSTATUS driverStatus = blackbone::Driver().EnsureLoaded();
+        if (!NT_SUCCESS( driverStatus ))
+        {
+            DriverExtract::Instance().Cleanup();
+            Err( L"failed to load BlackBone driver (0x%08X)\n", driverStatus );
+
+            // Driver state is undefined after a failed load; skip static teardown.
+            if (exitOnFailure)
+                ExitProcess( 3 );
+
+            return false;
+        }
+
+        return true;
+    }
+
+    NTSTATUS ExecuteInjection(
+        const Options& options,
+        InjectionCore& core,
+        DWORD pid,
+        const std::wstring& name,
+        const std::wstring& path,
+        ProcMode mode,
+        vecPEImages& images,
+        const std::vector<std::wstring>& paths,
+        std::vector<std::wstring>& handles )
+    {
+        InjectContext context;
+        context.cfg.processMode = mode;
+        context.cfg.injectMode = options.method;
+        context.cfg.procName = name;
+        context.cfg.procCmdLine = options.cmdline;
+        context.cfg.initRoutine = options.initRoutine;
+        context.cfg.initArgs = options.initArgs;
+        context.cfg.mmapFlags = options.mmapFlags;
+        context.cfg.hijack = options.hijack;
+        context.cfg.unlink = options.unlink;
+        context.cfg.erasePE = options.erasePE;
+        context.cfg.krnHandle = options.krnHandle;
+        context.cfg.delay = options.delay;
+        context.cfg.period = options.period;
+        context.cfg.images = paths;
+
+        context.pid = pid;
+        context.procPath = path;
+        context.images = images;
+
+        if (mode == NewProcess && context.cfg.procCmdLine.empty())
+            context.cfg.procCmdLine = L"\"" + path + L"\"";
+
+        const NTSTATUS status = core.InjectMultiple( &context );
+        handles = context.injectionIds;
+        return status;
+    }
+
     int CommandInject( const Options& options )
     {
         if (options.dlls.empty())
@@ -1075,61 +1314,17 @@ namespace
             return 0;
         }
 
-        // Kernel methods, handle escalation and HideVAD need the driver
-        const bool needsDriver = options.method >= Kernel_Thread || options.krnHandle ||
-            (options.mmapFlags & blackbone::HideVAD) != 0;
-
-        if (!IsElevated() && !needsDriver)
-            Err( L"note: not running elevated; elevated/protected targets will fail\n" );
-
-        if (needsDriver)
-        {
-            if (!IsElevated())
-            {
-                Err( L"kernel injection / --krn-handle / --hide-vad requires administrator rights; run from an elevated prompt\n" );
-                return 3;
-            }
-
-            DriverExtract::Instance().Extract();
-
-            NTSTATUS driverStatus = blackbone::Driver().EnsureLoaded();
-            if (!NT_SUCCESS( driverStatus ))
-            {
-                DriverExtract::Instance().Cleanup();
-                Err( L"failed to load BlackBone driver (0x%08X)\n", driverStatus );
-
-                // Driver state is undefined after a failed load; skip static teardown
-                ExitProcess( 3 );
-            }
-        }
-
-        InjectContext context;
-        context.cfg.processMode = target.mode;
-        context.cfg.injectMode = options.method;
-        context.cfg.procName = target.name;
-        context.cfg.procCmdLine = options.cmdline;
-        context.cfg.initRoutine = options.initRoutine;
-        context.cfg.initArgs = options.initArgs;
-        context.cfg.mmapFlags = options.mmapFlags;
-        context.cfg.hijack = options.hijack;
-        context.cfg.unlink = options.unlink;
-        context.cfg.erasePE = options.erasePE;
-        context.cfg.krnHandle = options.krnHandle;
-        context.cfg.delay = options.delay;
-        context.cfg.period = options.period;
-        context.cfg.images = paths;
-
-        context.pid = target.pid;
-        context.procPath = target.path;
-        context.images = images;
-
-        if (target.mode == NewProcess && context.cfg.procCmdLine.empty())
-            context.cfg.procCmdLine = L"\"" + target.path + L"\"";
+        if (!PrepareDriver( options, true ))
+            return 3;
 
         HWND hwnd = nullptr;
         InjectionCore core( hwnd );
 
-        NTSTATUS status = core.InjectMultiple( &context );
+        std::vector<std::wstring> injectionIds;
+        NTSTATUS status = ExecuteInjection(
+            options, core, target.pid, target.name, target.path, target.mode,
+            images, paths, injectionIds );
+
         if (!NT_SUCCESS( status ))
         {
             Err( L"injection failed: 0x%08X %ls\n", status,
@@ -1142,7 +1337,7 @@ namespace
         }
 
         std::wstring handles;
-        for (auto& id : context.injectionIds)
+        for (auto& id : injectionIds)
         {
             if (!handles.empty())
                 handles += L", ";
@@ -1153,18 +1348,18 @@ namespace
         if (options.json)
         {
             Out( L"{\"ok\":true,\"pid\":%lu,\"name\":\"%ls\",\"path\":\"%ls\",\"method\":\"%ls\",\"images\":%zu,\"handles\":[",
-                 context.pid,
+                 target.pid,
                  JsonEscape( target.name ).c_str(),
                  JsonEscape( target.path ).c_str(),
                  MethodName( options.method ),
                  paths.size() );
 
-            for (size_t i = 0; i < context.injectionIds.size(); i++)
+            for (size_t i = 0; i < injectionIds.size(); i++)
             {
                 if (i)
                     Out( L"," );
 
-                Out( L"%ls", context.injectionIds[i].c_str() );
+                Out( L"%ls", injectionIds[i].c_str() );
             }
 
             Out( L"]}\n" );
@@ -1172,13 +1367,299 @@ namespace
         else
         {
             Out( L"injected %zu image(s) into %ls (%lu) using %ls\n",
-                 paths.size(), target.name.c_str(), context.pid, MethodName( options.method ) );
+                 paths.size(), target.name.c_str(), target.pid, MethodName( options.method ) );
 
             if (!handles.empty())
                 Out( L"handles: %ls\n", handles.c_str() );
         }
 
         return 0;
+    }
+
+    int CommandWatch( const Options& options )
+    {
+        if (options.dlls.empty())
+        {
+            Err( L"watch requires --dll <path>\n" );
+            return 2;
+        }
+
+        if (!options.newExe.empty() || !options.waitExe.empty())
+        {
+            Err( L"watch cannot be combined with --new/--wait; it watches running instances\n" );
+            return 2;
+        }
+
+        if (options.method == Kernel_DriverMap)
+        {
+            Err( L"watch requires a process target; kernel driver mapping is not supported\n" );
+            return 2;
+        }
+
+        std::wstring targetName = options.targetName;
+        std::wstring targetPath;
+
+        if (!options.watchExe.empty())
+            targetPath = AbsolutePath( options.watchExe );
+
+        if (targetName.empty() && !targetPath.empty())
+            targetName = BaseName( targetPath );
+
+        // --pid narrows the initial target; new instances are matched by name.
+        if (targetName.empty() && !options.targetPid.empty())
+        {
+            proc::Catalog catalog;
+            catalog.Refresh();
+
+            proc::Entry entry;
+            if (!catalog.Find( options.targetPid, entry ))
+            {
+                Err( L"target process not found: %ls\n", options.targetPid.c_str() );
+                return 1;
+            }
+
+            targetName = entry.name;
+            targetPath = entry.path;
+        }
+
+        if (targetName.empty())
+        {
+            Err( L"watch requires --exe <path>, --name <image.exe>, or --pid <pid>\n" );
+            return 2;
+        }
+
+        vecPEImages images;
+        std::vector<std::wstring> paths;
+        if (!LoadImages( options, images, paths ))
+            return 2;
+
+        if (options.dryRun)
+        {
+            Out( L"target: %ls\n", targetName.c_str() );
+            if (!targetPath.empty())
+                Out( L"path:   %ls\n", targetPath.c_str() );
+
+            for (size_t i = 0; i < paths.size(); i++)
+                Out( L"dll[%zu]: %ls\n", i, paths[i].c_str() );
+
+            return 0;
+        }
+
+        if (!PrepareDriver( options, false ))
+            ExitProcess( 3 );
+
+        watch::Options watchOptions;
+        watchOptions.target.name = targetName;
+        watchOptions.target.path = targetPath;
+        watchOptions.readiness.modules = options.readyModules;
+        watchOptions.readiness.minModules = options.minModules;
+        watchOptions.readiness.stableChecks = options.stableChecks;
+        watchOptions.readiness.intervalMs = options.watchInterval;
+        watchOptions.readiness.settleMs = options.settleMs;
+        watchOptions.readiness.timeoutMs = options.watchTimeoutSec * 1000;
+        watchOptions.retry.attempts = options.retryCount;
+        watchOptions.retry.baseDelayMs = options.retryDelay;
+        watchOptions.retry.jitterMs = options.retryJitter;
+        watchOptions.pollMs = options.watchPoll;
+        watchOptions.runTimeoutMs = options.watchTimeoutSec * 1000;
+        watchOptions.once = options.watchOnce;
+        watchOptions.includeExisting = options.watchExisting;
+        watchOptions.exitWhenGone = options.watchExitWhenGone;
+
+        HWND hwnd = nullptr;
+        InjectionCore core( hwnd );
+
+        auto logFn = []( const std::wstring& text )
+        {
+            Err( L"%ls\n", text.c_str() );
+        };
+
+        auto injectFn = [&]( const watch::ProcessRef& target, std::wstring& message ) -> bool
+        {
+            // Do not stack a second copy of the same image into a process that
+            // already has a live tracked injection (watch may be restarted).
+            for (auto& record : InjectionRegistry::Instance().ForPid( target.pid ))
+            {
+                if (record.state != static_cast<int>( InjectionState::Loaded ))
+                    continue;
+
+                for (auto& path : paths)
+                {
+                    if (_wcsicmp( record.imagePath.c_str(), path.c_str() ) == 0 && IsInjectionLive( record ))
+                    {
+                        message = L"already injected as #" + std::to_wstring( record.id );
+
+                        if (options.json)
+                        {
+                            Out( L"{\"event\":\"skipped\",\"pid\":%lu,\"name\":\"%ls\","
+                                 L"\"handle\":%u,\"reason\":\"already-injected\"}\n",
+                                 target.pid,
+                                 JsonEscape( target.name ).c_str(),
+                                 record.id );
+                        }
+                        else
+                        {
+                            Err( L"PID %lu already has %ls (handle #%u); skipping\n",
+                                 target.pid, record.moduleName.c_str(), record.id );
+                        }
+
+                        return true;
+                    }
+                }
+            }
+
+            std::vector<std::wstring> handles;
+            const NTSTATUS status = ExecuteInjection(
+                options, core, target.pid, target.name, target.path, Existing,
+                images, paths, handles );
+
+            if (!NT_SUCCESS( status ))
+            {
+                message = blackbone::Utils::GetErrorDescription( status );
+
+                if (options.json)
+                {
+                    Out( L"{\"event\":\"injection-failed\",\"pid\":%lu,\"name\":\"%ls\","
+                         L"\"message\":\"%ls\",\"status\":\"0x%08X\"}\n",
+                         target.pid,
+                         JsonEscape( target.name ).c_str(),
+                         JsonEscape( message ).c_str(),
+                         status );
+                }
+
+                return false;
+            }
+
+            if (options.json)
+            {
+                Out( L"{\"event\":\"injected\",\"ok\":true,\"pid\":%lu,\"name\":\"%ls\","
+                     L"\"path\":\"%ls\",\"method\":\"%ls\",\"images\":%zu,\"handles\":[",
+                     target.pid,
+                     JsonEscape( target.name ).c_str(),
+                     JsonEscape( target.path ).c_str(),
+                     MethodName( options.method ),
+                     paths.size() );
+
+                for (size_t i = 0; i < handles.size(); i++)
+                {
+                    if (i)
+                        Out( L"," );
+
+                    Out( L"%ls", handles[i].c_str() );
+                }
+
+                Out( L"]}\n" );
+            }
+            else
+            {
+                std::wstring joined;
+                for (auto& id : handles)
+                {
+                    if (!joined.empty())
+                        joined += L", ";
+
+                    joined += L"#" + id;
+                }
+
+                Out( L"injected %zu image(s) into %ls (%lu) using %ls%s%ls\n",
+                     paths.size(), target.name.c_str(), target.pid, MethodName( options.method ),
+                     joined.empty() ? L"" : L", handles: ", joined.c_str() );
+            }
+
+            return true;
+        };
+
+        if (options.json)
+        {
+            Out( L"{\"event\":\"watch\",\"target\":\"%ls\",\"path\":\"%ls\","
+                 L"\"once\":%ls,\"includeExisting\":%ls}\n",
+                 JsonEscape( targetName ).c_str(),
+                 JsonEscape( targetPath ).c_str(),
+                 options.watchOnce ? L"true" : L"false",
+                 options.watchExisting ? L"true" : L"false" );
+        }
+        else
+        {
+            Out( L"watching for %ls%s%ls\n",
+                 targetName.c_str(),
+                 targetPath.empty() ? L"" : L" at ", targetPath.c_str() );
+        }
+
+        watch::Watcher watcher( watchOptions, injectFn, logFn );
+        g_activeWatcher = &watcher;
+
+        SetConsoleCtrlHandler( WatchCtrlHandler, TRUE );
+        const bool ok = watcher.Run();
+        SetConsoleCtrlHandler( WatchCtrlHandler, FALSE );
+
+        g_activeWatcher = nullptr;
+
+        if (ok)
+            return 0;
+
+        const std::wstring& message = watcher.LastResult().message;
+        if (message.find( L"no target" ) != std::wstring::npos ||
+            message.find( L"timed out" ) != std::wstring::npos)
+        {
+            return 1;
+        }
+
+        return 3;
+    }
+
+    int CommandHarden( const Options& options )
+    {
+        if (options.positional.empty())
+        {
+            Err( L"harden requires a PE file path\n" );
+            return 2;
+        }
+
+        if (!options.watchExe.empty() || options.watch)
+        {
+            Err( L"harden cannot be combined with watch options\n" );
+            return 2;
+        }
+
+        peh::Options hardenOptions;
+        hardenOptions.timestamp = options.hardenTimestamp;
+        hardenOptions.overlayBytes = options.hardenOverlay;
+        hardenOptions.inPlace = options.hardenInPlace;
+        hardenOptions.force = options.force;
+        hardenOptions.output = options.hardenOutput.empty() ?
+            L"" : AbsolutePath( options.hardenOutput );
+
+        peh::Result result;
+        const bool ok = peh::Harden(
+            AbsolutePath( options.positional.front() ), hardenOptions, result );
+
+        if (options.json)
+        {
+            Out( L"{\"ok\":%ls,\"input\":\"%ls\",\"output\":\"%ls\","
+                 L"\"oldTimestamp\":%lu,\"newTimestamp\":%lu,"
+                 L"\"oldSize\":%llu,\"newSize\":%llu,\"overlay\":%lu,"
+                 L"\"message\":\"%ls\"}\n",
+                 ok ? L"true" : L"false",
+                 JsonEscape( result.inputPath ).c_str(),
+                 JsonEscape( result.outputPath ).c_str(),
+                 result.oldTimestamp,
+                 result.newTimestamp,
+                 static_cast<unsigned long long>( result.oldSize ),
+                 static_cast<unsigned long long>( result.newSize ),
+                 result.overlayBytes,
+                 JsonEscape( result.message ).c_str() );
+        }
+        else if (ok)
+        {
+            Out( L"hardened: %ls\n", result.outputPath.c_str() );
+            Out( L"  %ls\n", result.message.c_str() );
+        }
+        else
+        {
+            Err( L"harden failed: %ls\n", result.message.c_str() );
+        }
+
+        return ok ? 0 : 3;
     }
 }
 
@@ -1244,8 +1725,12 @@ int wmain( int argc, wchar_t** argv )
         return CommandEject( options );
     if (command == L"reinject")
         return CommandReinject( options );
+    if (command == L"watch")
+        return CommandWatch( options );
+    if (command == L"harden")
+        return CommandHarden( options );
     if (command == L"inject")
-        return CommandInject( options );
+        return options.watch ? CommandWatch( options ) : CommandInject( options );
     if (command == L"help")
     {
         PrintUsage();

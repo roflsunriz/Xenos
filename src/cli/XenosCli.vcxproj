@@ -89,6 +89,8 @@
     <ClCompile Include="..\InjectionRegistry.cpp" />
     <ClCompile Include="..\ProcessCatalog.cpp" />
     <ClCompile Include="..\ProfileMgr.cpp" />
+    <ClCompile Include="..\WatchInjector.cpp" />
+    <ClCompile Include="..\PeHardener.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\AppSettings.h" />
@@ -98,6 +100,8 @@
     <ClInclude Include="..\InjectionRegistry.h" />
     <ClInclude Include="..\ProcessCatalog.h" />
     <ClInclude Include="..\ProfileMgr.h" />
+    <ClInclude Include="..\WatchInjector.h" />
+    <ClInclude Include="..\PeHardener.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="XenosCli.rc" />

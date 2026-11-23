@@ -33,7 +33,8 @@ Supported OS: Win7 - Win10 x64
 ## Fork additions: fast target selection ##
 
 This fork keeps the injection engine intact and adds a headless process-picker
-core plus a game-engine-aware GUI.
+core, a game-engine-aware GUI, an AmalgamLoader-style auto-injector (`watch`),
+and a safe PE fingerprint tool (`harden`).
 
 ### Process selection types ###
 
@@ -96,6 +97,8 @@ XenosCli64 injections [--pid N] [--json]
 XenosCli64 eject <handle> [--force] [--json]
 XenosCli64 reinject <handle> [--json]
 XenosCli64 inject --dll <path> [--dll <path> ...] [target] [options]
+XenosCli64 watch  --dll <path> (--exe <path>|--name <image>|--pid N) [options]
+XenosCli64 harden <pe-file> [--output <path>|--in-place] [options]
 XenosCli64 gui [--load profile.xpr64]
 ```
 
@@ -218,6 +221,89 @@ the target. `--force` skips the check and performs a plain unload.
 Re-inject first ejects the old handle and any other tracked instance of the
 same image in that process, then injects with the original method/options.
 The old handle remains in the history; the new injection gets a new handle.
+
+#### Auto-injection (`watch`, AmalgamLoader-style) ####
+
+`watch` is a headless auto-injector modelled on AmalgamLoader's `AutoInject`
+loop. It waits for the target to start, waits until the process is actually
+ready instead of injecting on the first process-created event, then retries
+with exponential backoff and jitter:
+
+```text
+# Wait for a new MyGame.exe, require engine.dll and at least 16 modules,
+# wait 3 more seconds, then inject (3 attempts by default)
+XenosCli64 watch --dll payload.dll --name MyGame.exe \
+  --module engine.dll --min-modules 16 --settle 3000
+
+# Inject an existing instance once and exit
+XenosCli64 watch --dll payload.dll --exe "C:\Games\MyGame\MyGame.exe" --once
+
+# Keep watching and inject every new instance until Ctrl+C
+XenosCli64 watch --dll payload.dll --name MyGame.exe --watch-existing
+```
+
+Readiness options:
+
+| Option | Meaning |
+| --- | --- |
+| `--module <name>` | Require a loaded module (repeatable, case-insensitive substring). |
+| `--min-modules <n>` | Require at least N loaded modules. |
+| `--stable-checks <n>` | Consecutive ready checks before injecting (default 2). |
+| `--watch-interval <ms>` | Readiness poll interval (default 500). |
+| `--settle <ms>` | Extra delay after the process is stable. |
+| `--watch-existing` / `--no-watch-existing` | Include/exclude instances that are already running (default: include). |
+| `--watch-timeout <sec>` | Give up after N seconds (default: forever). |
+| `--once` | Exit after the first successful injection. |
+| `--exit-when-gone` | Exit when no target instance is running. |
+
+Retry options:
+
+| Option | Meaning |
+| --- | --- |
+| `--retry <n>` | Total injection attempts (default 3). |
+| `--retry-delay <ms>` | First retry delay, doubled per attempt (default 500). |
+| `--jitter <ms>` | Random jitter added to each retry delay (default 100). |
+
+The watcher also:
+
+- detects PID reuse through the process creation time;
+- skips a process that already has a live tracked injection of the same image
+  (so restarting the watcher does not stack a second copy);
+- keeps watching for new instances after a successful injection unless
+  `--once` is used;
+- honors Ctrl+C and unloads the driver on a normal exit.
+
+`--watch` can also be added to `inject` to use the same engine.
+The GUI's **Manual launch** path uses the same readiness probe (two stable
+module snapshots, at most 5 seconds) before injecting; the full retry/watch
+loop is CLI-only.
+
+#### PE fingerprint randomization (`harden`) ####
+
+AmalgamLoader also randomizes its own PE signatures. `harden` provides the
+safe subset of that feature for payload binaries:
+
+```text
+XenosCli64 harden payload.dll
+XenosCli64 harden payload.dll --output payload.hardened.dll --overlay 4096
+XenosCli64 harden payload.dll --in-place --no-timestamp
+```
+
+It only:
+
+- writes a randomized, plausible `TimeDateStamp` (180-730 days in the past);
+- appends a random overlay, which changes the file hash;
+- recomputes the optional-header checksum when the image has one.
+
+It never patches code, resources or section contents. The transformed image
+is parsed again before it is written, output is written to a temporary file
+and moved into place, and `--in-place` refuses to touch the currently running
+executable. The default output is `<name>.hardened<ext>`; use `--force` to
+overwrite an existing output.
+
+This is not a replacement for code signing or a packer, and it does not
+include AmalgamLoader's anti-sandbox checks or NTDLL unhooking; those are
+unrelated to DLL injection and were intentionally left out.
 
 The GUI exposes the same list under **Tools > Tracked injections...** with
 **Eject** and **Re-inject** buttons. The main window also has an **Eject**
